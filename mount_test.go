@@ -24,6 +24,9 @@ func TestFixtures(t *testing.T) {
 	if dir == "" {
 		t.Skip("BM_FIXTURES not set; run testdata/make_fixtures.sh DIR first")
 	}
+	defer func(s int64) { indexSpan = s }(indexSpan)
+	indexSpan = 1 << 20                                  // 37 checkpoints in the 200 MiB fixture (zero runs make multi-MiB deflate blocks)
+	os.Remove(filepath.Join(dir, "mbr/disk.img.gz.idx")) // first open builds it, the second reuses it
 	want := readManifest(t, filepath.Join(dir, "manifest.sha256"))
 	want["link"] = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" // ponytail symlink: empty file
 	st, err := os.Stat(filepath.Join(dir, "manifest.sha256"))
@@ -42,8 +45,10 @@ func TestFixtures(t *testing.T) {
 		{"gpt-dyn.vhd", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat"}},
 		{"gpt-fixed.vhd", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat"}},
 		{"gpt.vhdx", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat"}},
-		{"mbr/disk.img", []string{"ext4", "ntfs", "fat32"}}, // raw MBR disk as the top-level file
-		{"mbr/bare-ext4.img", []string{"ext4"}},            // single partition as the top-level file
+		{"mbr/disk.img", []string{"ext4", "ntfs", "fat32"}},                                                 // raw MBR disk as the top-level file
+		{"mbr/bare-ext4.img", []string{"ext4"}},                                                             // single partition as the top-level file
+		{"mbr/disk.img.gz", []string{"ext4", "ntfs", "fat32"}},                                              // gzip checkpoints; the 32 MiB run evicts and re-seeks
+		{"mbr/disk.img.xz", []string{"ext4", "ntfs", "fat32"}},                                              // 25 xz blocks
 		{"vhd-zstd.squashfs", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat", "ext4", "ntfs", "fat32"}}, // gpt.vhdx (386M) then mbr-dyn.vhd (200M)
 		{"manifest.sha256", nil}, // neither squashfs nor image: no volumes, no error
 	} {
@@ -83,6 +88,19 @@ func TestFixtures(t *testing.T) {
 				}
 			}
 		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, "mbr/disk.img.gz.idx")); err != nil {
+		t.Errorf("gzip index not written next to the archive: %v", err)
+	}
+}
+
+func TestSingleBlockXZ(t *testing.T) {
+	dir := os.Getenv("BM_FIXTURES")
+	if dir == "" {
+		t.Skip("BM_FIXTURES not set")
+	}
+	if _, err := openStack(filepath.Join(dir, "mbr/single.img.xz"), 32<<20, nil); err == nil || !strings.Contains(err.Error(), "single-block") {
+		t.Fatalf("err = %v, want single-block xz error", err)
 	}
 }
 

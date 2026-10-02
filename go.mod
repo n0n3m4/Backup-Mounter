@@ -17,6 +17,7 @@ require (
 	github.com/go-filesystems/fat32 v0.4.0
 	github.com/go-filesystems/interface v0.3.0
 	github.com/go-volumes/gpt v0.2.0
+	github.com/unxed/xz v0.1.47
 	github.com/winfsp/go-winfsp v1.0.4
 	golang.org/x/sys v0.48.0
 	www.velocidex.com/golang/go-ntfs v0.2.1

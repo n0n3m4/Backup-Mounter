@@ -72,5 +72,9 @@ mksquashfs gpt gpt-zstd.squashfs -comp zstd -b 1M -noappend -quiet -no-progress
 mksquashfs gpt gpt-lz4.squashfs -comp lz4 -Xhc -b 1M -noappend -quiet -no-progress
 mksquashfs mbr mbr-gzip.squashfs -comp gzip -b 1M -noappend -quiet -no-progress
 mksquashfs vhd vhd-zstd.squashfs -comp zstd -b 1M -noappend -quiet -no-progress
+# after mbr-gzip.squashfs, so the squashfs does not contain these (the rm at the top removes mbr/)
+gzip -k mbr/disk.img                                         # one member, indexed on first open (disk.img.gz.idx)
+xz -k -0 -T2 --block-size=8MiB mbr/disk.img                  # 25 blocks: random access via the xz index
+xz -0 -T1 -c mbr/bare-ext4.img > mbr/single.img.xz           # one block (-T1: xz >= 5.6 is multi-threaded, hence multi-block, by default): must be rejected
 rm -rf gpt vhd ext4.img btrfs.img fat32.img ntfs.img exfat.img # mbr/ stays: raw disk + bare partition, tested as top-level files
 ls -l "$OUT"

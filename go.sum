@@ -60,6 +60,8 @@ github.com/stretchr/testify v1.8.1 h1:w7B6lhMri9wdJUVmEZPGGhZzrYTPvgJArz7wNPgYKs
 github.com/stretchr/testify v1.8.1/go.mod h1:w2LPCIKwWwSfY2zedu0+kehJoqGctiVI29o6fzry7u4=
 github.com/ulikunitz/xz v0.5.10 h1:t92gobL9l3HE202wg3rlk19F6X+JOxl9BBrCCMYEYd8=
 github.com/ulikunitz/xz v0.5.10/go.mod h1:nbz6k7qbPmH4IRqmfOplQw/tblSgqTqBwxkY0oWt/14=
+github.com/unxed/xz v0.1.47 h1:W5silw+vOEo7FkhpNG+j1EZySH9S1V223ZO65Pr3KFI=
+github.com/unxed/xz v0.1.47/go.mod h1:3QBWvJLIJ264yrPluSGFVZ2cLqcf53dKpGANZtGW0Zc=
 github.com/winfsp/go-winfsp v1.0.4 h1:5Di2fdBkfsIxMHCLF/TNQ7GvF6M5i3DRSW7gnDfQM2Q=
 github.com/winfsp/go-winfsp v1.0.4/go.mod h1:aE+JiVxKhiHzrCTmmk1aB83aZv68JAQqUO+jni6q1Cg=
 golang.org/x/sync v0.0.0-20201207232520-09787c993a3a/go.mod h1:RxMgew5VJxzue5/jJTE5uejpjVlOe/izrB70Jof72aM=

@@ -18,7 +18,7 @@ const (
 	LZMA                        // LZMA compression (currently not implemented via build tag)
 	LZO                         // LZO compression (currently not implemented via build tag)
 	XZ                          // XZ compression (enabled with "xz" build tag)
-	LZ4                         // LZ4 compression (currently not implemented via build tag)
+	LZ4                         // LZ4 compression (enabled with "lz4" build tag)
 	ZSTD                        // Zstandard compression (enabled with "zstd" build tag)
 )
 
@@ -106,7 +106,7 @@ func RegisterCompHandler(method Compression, handler *CompHandler) {
 //
 // Example use:
 // * squashfs.RegisterDecompressor(squashfs.ZSTD, squashfs.MakeDecompressor(zstd.ZipDecompressor()))
-// * squashfs.RegisterDecompressor(squashfs.LZ4, squashfs.MakeDecompressor(lz4.NewReader)))
+// LZ4 is not one of these: squashfs stores raw LZ4 blocks, see lz4.UncompressBlock in comp_lz4.go.
 func MakeDecompressor(dec func(r io.Reader) io.ReadCloser) Decompressor {
 	return func(buf []byte) ([]byte, error) {
 		r := bytes.NewReader(buf)

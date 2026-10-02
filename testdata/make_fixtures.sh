@@ -2,7 +2,7 @@
 # Builds test fixtures without root: filesystems are populated by the mkfs
 # tools themselves, laid into partitioned disk images with dd, then wrapped in
 # squashfs. Usage: testdata/make_fixtures.sh OUTDIR, then
-# BM_FIXTURES=OUTDIR go test -tags xz,zstd ./...
+# BM_FIXTURES=OUTDIR go test -tags xz,zstd,lz4 ./...
 set -eu
 OUT=${1:?usage: make_fixtures.sh OUTDIR}
 mkdir -p "$OUT"
@@ -56,6 +56,7 @@ put fat32.img mbr/disk.img 131
 cp ext4.img mbr/bare-ext4.img
 
 mksquashfs gpt gpt-zstd.squashfs -comp zstd -b 1M -noappend -quiet -no-progress
+mksquashfs gpt gpt-lz4.squashfs -comp lz4 -Xhc -b 1M -noappend -quiet -no-progress
 mksquashfs mbr mbr-gzip.squashfs -comp gzip -b 1M -noappend -quiet -no-progress
 rm -rf gpt mbr ext4.img btrfs.img fat32.img ntfs.img
 ls -l "$OUT"

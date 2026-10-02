@@ -31,6 +31,7 @@ func TestFixtures(t *testing.T) {
 		kinds []string
 	}{
 		{"gpt-zstd.squashfs", []string{"ext4", "btrfs", "fat32", "ntfs"}},
+		{"gpt-lz4.squashfs", []string{"ext4", "btrfs", "fat32", "ntfs"}},
 		{"mbr-gzip.squashfs", []string{"ext4", "ntfs", "fat32", "ext4"}}, // 2 logical partitions, then the bare image
 	} {
 		for _, budget := range []int64{256 << 20, 32 << 20} { // 32 MiB: ~10x smaller than the image, forces eviction

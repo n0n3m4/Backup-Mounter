@@ -1,5 +1,5 @@
 GO ?= go
-TAGS := xz,zstd
+TAGS := xz,zstd,lz4
 FIXTURES ?= $(CURDIR)/.fixtures
 
 .PHONY: build test fixtures

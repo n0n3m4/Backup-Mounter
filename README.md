@@ -16,11 +16,11 @@ squashfs blocks.
 
 ## Build
 
-    make build      # backup-mounter.exe (CGO_ENABLED=0 GOOS=windows, -tags xz,zstd)
+    make build      # backup-mounter.exe (CGO_ENABLED=0 GOOS=windows, -tags xz,zstd,lz4)
     make fixtures   # test images, needs mkfs.ext4/btrfs/vfat/ntfs, sgdisk, parted, mksquashfs
     make test
 
-Always build with `-tags xz,zstd`, or xz/zstd-compressed squashfs files won't open.
+Always build with `-tags xz,zstd,lz4`, or xz/zstd/lz4-compressed squashfs files won't open.
 
 ## Usage
 
@@ -40,6 +40,7 @@ Ctrl-C unmounts everything.
 ext4, btrfs (zlib/lzo/zstd, subvolumes and snapshots shown as directories),
 NTFS, FAT32. Partitions: GPT, MBR including logical partitions, or a bare
 filesystem image.
+Squashfs compression: gzip, xz, zstd, lz4 (incl. `-Xhc`).
 
 Known gaps:
 - exFAT, FAT12/16: not supported (skipped with a log line).

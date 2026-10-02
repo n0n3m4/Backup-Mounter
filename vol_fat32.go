@@ -6,26 +6,41 @@ import (
 	"path"
 	"time"
 
+	exfat "github.com/go-filesystems/exfat"
 	fat32 "github.com/go-filesystems/fat32"
 	filesystem "github.com/go-filesystems/interface"
 )
 
-// fat32Vol: the library exposes no timestamps, so every mtime is zero.
-type fat32Vol struct{ fs filesystem.Filesystem }
+// fatVol serves FAT32 and exFAT: the libraries expose no timestamps, so every mtime is zero.
+type fatVol struct{ fs filesystem.Filesystem }
 
 func openFAT32(r *io.SectionReader) (fs.FS, string, error) {
 	f, err := fat32.OpenReader(r, r.Size())
 	if err != nil {
 		return nil, "", err
 	}
+	fsys, label := wrapFAT(f)
+	return fsys, label, nil
+}
+
+func openExFAT(r *io.SectionReader) (fs.FS, string, error) {
+	f, err := exfat.OpenReader(r, r.Size())
+	if err != nil {
+		return nil, "", err
+	}
+	fsys, label := wrapFAT(f)
+	return fsys, label, nil
+}
+
+func wrapFAT(f filesystem.Filesystem) (fs.FS, string) {
 	label := ""
 	if l, ok := f.(filesystem.LabelReader); ok {
 		label = l.Label()
 	}
-	return volFS{fat32Vol{f}}, label, nil
+	return volFS{fatVol{f}}, label
 }
 
-func (v fat32Vol) stat(name string) (fileInfo, error) {
+func (v fatVol) stat(name string) (fileInfo, error) {
 	st, err := v.fs.Stat(path.Join("/", name))
 	if err != nil {
 		return fileInfo{}, err
@@ -34,7 +49,7 @@ func (v fat32Vol) stat(name string) (fileInfo, error) {
 }
 
 // ponytail: one Stat (a path lookup) per entry, O(n²) in directory size; fine for an ESP, revisit for a 10k-file camera card.
-func (v fat32Vol) readDir(name string) ([]fileInfo, error) {
+func (v fatVol) readDir(name string) ([]fileInfo, error) {
 	entries, err := v.fs.ListDir(path.Join("/", name))
 	if err != nil {
 		return nil, err
@@ -53,6 +68,6 @@ func (v fat32Vol) readDir(name string) ([]fileInfo, error) {
 	return out, nil
 }
 
-func (v fat32Vol) open(name string) (io.ReaderAt, error) {
+func (v fatVol) open(name string) (io.ReaderAt, error) {
 	return v.fs.(filesystem.Opener).OpenFile(path.Join("/", name))
 }

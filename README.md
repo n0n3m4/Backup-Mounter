@@ -17,7 +17,7 @@ squashfs blocks.
 ## Build
 
     make build      # backup-mounter.exe (CGO_ENABLED=0 GOOS=windows, -tags xz,zstd,lz4)
-    make fixtures   # test images, needs mkfs.ext4/btrfs/vfat/ntfs, sgdisk, parted, mksquashfs
+    make fixtures   # test images, needs mkfs.ext4/btrfs/vfat/ntfs/exfat, sgdisk, parted, mksquashfs
     make test
 
 Always build with `-tags xz,zstd,lz4`, or xz/zstd/lz4-compressed squashfs files won't open.
@@ -38,19 +38,20 @@ Ctrl-C unmounts everything.
 ## Filesystems
 
 ext4, btrfs (zlib/lzo/zstd, subvolumes and snapshots shown as directories),
-NTFS, FAT32. Partitions: GPT, MBR including logical partitions, or a bare
+NTFS, FAT32, exFAT. Partitions: GPT, MBR including logical partitions, or a bare
 filesystem image.
 Squashfs compression: gzip, xz, zstd, lz4 (incl. `-Xhc`).
 
 Known gaps:
-- exFAT, FAT12/16: not supported (skipped with a log line).
+- FAT12/16: not supported (skipped with a log line).
 - Symlinks (and devices, fifos) appear as empty files; NTFS reparse points
   appear as their plain file/dir. NTFS metafiles (`$MFT`, ...) are hidden.
-- FAT32 timestamps are not exposed by the library and show as zero.
+- FAT32 and exFAT timestamps are not exposed by the libraries and show as zero.
 - btrfs shows the top-level subvolume, not the `set-default` one; single-device only.
 - No read-ahead/prefetch yet; the chunk cache is where it would plug in.
 - Each NTFS volume serializes all reads behind one lock; ext4 serializes per open file.
 
-`third_party/` holds two patched forks (changes are marked `backup-mounter` in the source):
-`btrfs` (read-only range reader, subvolume crossing, zstd padding fix) and
+`third_party/` holds three patched forks (changes are marked `backup-mounter` in the source):
+`btrfs` (read-only range reader, subvolume crossing, zstd padding fix),
+`exfat` (multi-cluster NoFatChain directories listed in full) and
 `squashfs` (1 MiB uncompressed block size mask fix).

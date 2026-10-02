@@ -30,8 +30,8 @@ func TestFixtures(t *testing.T) {
 		file  string
 		kinds []string
 	}{
-		{"gpt-zstd.squashfs", []string{"ext4", "btrfs", "fat32", "ntfs"}},
-		{"gpt-lz4.squashfs", []string{"ext4", "btrfs", "fat32", "ntfs"}},
+		{"gpt-zstd.squashfs", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat"}},
+		{"gpt-lz4.squashfs", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat"}},
 		{"mbr-gzip.squashfs", []string{"ext4", "ntfs", "fat32", "ext4"}}, // 2 logical partitions, then the bare image
 	} {
 		for _, budget := range []int64{256 << 20, 32 << 20} { // 32 MiB: ~10x smaller than the image, forces eviction
@@ -47,7 +47,7 @@ func TestFixtures(t *testing.T) {
 				t.Fatalf("%s: kinds %v, want %v", tc.file, kinds, tc.kinds)
 			}
 			for _, v := range vols {
-				if want := map[string]string{"ext4": "ext4vol", "btrfs": "btrfsvol", "fat32": "FATVOL", "ntfs": "ntfsvol"}[v.kind]; v.label != want {
+				if want := map[string]string{"ext4": "ext4vol", "btrfs": "btrfsvol", "fat32": "FATVOL", "ntfs": "ntfsvol", "exfat": "EXFATVOL"}[v.kind]; v.label != want {
 					t.Errorf("%s: label %q, want %q", v.name, v.label, want)
 				}
 				root, err := fs.ReadDir(v.fsys, ".")
@@ -64,7 +64,7 @@ func TestFixtures(t *testing.T) {
 						t.Errorf("%s: root = %v", v.name, names)
 					}
 					checkFiles(t, v, map[string]string{"hello.txt": want["hello.txt"], "random.bin": want["dir/random.bin"]})
-				case "ext4", "btrfs":
+				case "ext4", "btrfs", "fat32", "exfat":
 					checkTree(t, v, filepath.Join(dir, "src"), want)
 				}
 			}

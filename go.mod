@@ -4,10 +4,13 @@ go 1.26.5
 
 replace github.com/go-filesystems/btrfs => ./third_party/btrfs
 
+replace github.com/go-filesystems/exfat => ./third_party/exfat
+
 require (
 	github.com/KarpelesLab/squashfs v1.2.0
 	github.com/aoiflux/libext v0.3.0
 	github.com/go-filesystems/btrfs v0.1.0
+	github.com/go-filesystems/exfat v0.3.1-0.20260924072827-4792096f9a7f
 	github.com/go-filesystems/fat32 v0.4.0
 	github.com/go-filesystems/interface v0.3.0
 	github.com/go-volumes/gpt v0.2.0

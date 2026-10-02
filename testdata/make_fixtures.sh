@@ -6,7 +6,9 @@
 set -eu
 OUT=${1:?usage: make_fixtures.sh OUTDIR}
 mkdir -p "$OUT"
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$OUT"
+populate() { go -C "$ROOT" run ./testdata/populate "$1" "$PWD/$2" "$PWD/src"; } # FAT kinds: no mtools, so the readers' own libraries write
 rm -rf src gpt mbr ./*.img ./*.squashfs manifest.sha256
 
 # --- source tree (ext4 and btrfs get a copy; manifest lists regular files) ---
@@ -29,20 +31,23 @@ mkfs.ext4 -q -F -L ext4vol -d src ext4.img 64M
 truncate -s 128M btrfs.img
 mkfs.btrfs -q -f -L btrfsvol --compress zstd -u rw:vol1 -u rw:vol1/inner -u rw:dir/vol2 -r src btrfs.img \
   || mkfs.btrfs -q -f -L btrfsvol -u rw:vol1 -u rw:vol1/inner -u rw:dir/vol2 -r src btrfs.img
-rm -f fat32.img && mkfs.vfat -F 32 -s 1 -n FATVOL -C fat32.img 65536 >/dev/null # empty: no mtools
+rm -f fat32.img && mkfs.vfat -F 32 -s 1 -n FATVOL -C fat32.img 65536 >/dev/null && populate -kind=fat32 fat32.img
+truncate -s 64M exfat.img && mkfs.exfat -L EXFATVOL exfat.img >/dev/null && populate -kind=exfat exfat.img
 truncate -s 64M ntfs.img && mkfs.ntfs -q -F -Q -L ntfsvol ntfs.img >/dev/null 2>&1
 ntfscp -q ntfs.img src/hello.txt hello.txt && ntfscp -q ntfs.img src/dir/random.bin random.bin # root files only: ntfscp cannot mkdir
 
-# --- GPT disk: ext4, btrfs, fat32, ntfs at 1, 65, 193, 257 MiB ---
+# --- GPT disk: ext4, btrfs, fat32, ntfs, exfat at 1, 65, 193, 257, 321 MiB ---
 mkdir gpt
-truncate -s 322M gpt/disk.img
+truncate -s 386M gpt/disk.img
 sgdisk -o -n 1:2048:133119 -t 1:8300 -n 2:133120:395263 -t 2:8300 \
-  -n 3:395264:526335 -t 3:0700 -n 4:526336:657407 -t 4:0700 gpt/disk.img >/dev/null
+  -n 3:395264:526335 -t 3:0700 -n 4:526336:657407 -t 4:0700 \
+  -n 5:657408:788479 -t 5:0700 gpt/disk.img >/dev/null
 put() { dd if="$1" of="$2" bs=1M seek="$3" conv=notrunc status=none; }
 put ext4.img gpt/disk.img 1
 put btrfs.img gpt/disk.img 65
 put fat32.img gpt/disk.img 193
 put ntfs.img gpt/disk.img 257
+put exfat.img gpt/disk.img 321
 echo "not a disk" > gpt/README.txt
 
 # --- MBR disk: primary ext4, logical ntfs + fat32 in an extended partition; plus a bare ext4 image ---
@@ -58,5 +63,5 @@ cp ext4.img mbr/bare-ext4.img
 mksquashfs gpt gpt-zstd.squashfs -comp zstd -b 1M -noappend -quiet -no-progress
 mksquashfs gpt gpt-lz4.squashfs -comp lz4 -Xhc -b 1M -noappend -quiet -no-progress
 mksquashfs mbr mbr-gzip.squashfs -comp gzip -b 1M -noappend -quiet -no-progress
-rm -rf gpt mbr ext4.img btrfs.img fat32.img ntfs.img
+rm -rf gpt mbr ext4.img btrfs.img fat32.img ntfs.img exfat.img
 ls -l "$OUT"

@@ -16,7 +16,7 @@ import (
 
 type volume struct {
 	name  string // e.g. "disk.img#2"
-	kind  string // ntfs, ext4, btrfs, fat32
+	kind  string // ntfs, ext4, btrfs, fat32, exfat
 	label string
 	size  int64
 	fsys  fs.FS
@@ -34,6 +34,8 @@ func probe(r io.ReaderAt) string {
 	switch {
 	case at(3, 8) == "NTFS    ":
 		return "ntfs"
+	case at(3, 8) == "EXFAT   ":
+		return "exfat"
 	case at(0x438, 2) == "\x53\xef":
 		return "ext4"
 	case at(0x10040, 8) == "_BHRfS_M":
@@ -93,6 +95,8 @@ func openFS(kind string, r *io.SectionReader) (fs.FS, string, error) {
 		return openNTFS(r)
 	case "fat32":
 		return openFAT32(r)
+	case "exfat":
+		return openExFAT(r)
 	}
 	return nil, "", fmt.Errorf("unsupported")
 }

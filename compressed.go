@@ -23,10 +23,12 @@ import (
 // indexSpan is the uncompressed distance between gzip checkpoints (a variable so the test can shrink it).
 var indexSpan int64 = 16 << 20
 
-// openCompressed returns the decompressed contents of a gzip or xz file as a
-// random-access reader; ok=false means f is neither and the caller carries on.
+// openCompressed returns the decompressed contents of a gzip or xz file, or the
+// partition inside an Acronis .tib, as a random-access reader; ok=false means f
+// is none of them and the caller carries on.
 //
-//	raw chunkCache (1/8 budget) -> spanReader (one live decoder) -> decompressed chunkCache (7/8)
+//	gzip/xz: raw chunkCache (1/8 budget) -> spanReader (one live decoder) -> decompressed chunkCache (7/8)
+//	.tib:    file (blocks are random-access) -> tibReader -> decompressed chunkCache (whole budget, chunk = block)
 func openCompressed(path string, f *os.File, st os.FileInfo, budget int64) (r io.ReaderAt, size int64, ok bool, err error) {
 	var magic [6]byte
 	n, _ := f.ReadAt(magic[:], 0)
@@ -36,6 +38,12 @@ func openCompressed(path string, f *os.File, st os.FileInfo, budget int64) (r io
 		s, err = openGzip(path, f, st, newChunkCache(f, st.Size(), 4<<20, budget/8))
 	case n == 6 && string(magic[:]) == "\xfd7zXZ\x00":
 		s, err = openXZ(path, newChunkCache(f, st.Size(), 4<<20, budget/8), st.Size())
+	case n >= 4 && string(magic[:4]) == "\xce\x24\xb9\xa2": // Acronis .tib
+		t, err := openTib(filepath.Base(path), f, st.Size())
+		if err != nil {
+			return nil, 0, true, fmt.Errorf("%s: %w", path, err)
+		}
+		return newChunkCache(t, t.size, t.blockSize, budget), t.size, true, nil
 	default:
 		return nil, 0, false, nil
 	}

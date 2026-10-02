@@ -27,6 +27,12 @@ func TestFixtures(t *testing.T) {
 	defer func(s int64) { indexSpan = s }(indexSpan)
 	indexSpan = 1 << 20                                  // 37 checkpoints in the 200 MiB fixture (zero runs make multi-MiB deflate blocks)
 	os.Remove(filepath.Join(dir, "mbr/disk.img.gz.idx")) // first open builds it, the second reuses it
+	img, err := os.ReadFile(filepath.Join(dir, "mbr/bare-ext4.img"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTib(t, img, filepath.Join(dir, "bare-ext4.tib"), 0)
+	writeTib(t, img, filepath.Join(dir, "bare-ext4-frag.tib"), 135) // early chunk map fragment, as in TI's own backups
 	want := readManifest(t, filepath.Join(dir, "manifest.sha256"))
 	want["link"] = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" // ponytail symlink: empty file
 	st, err := os.Stat(filepath.Join(dir, "manifest.sha256"))
@@ -50,7 +56,9 @@ func TestFixtures(t *testing.T) {
 		{"mbr/disk.img.gz", []string{"ext4", "ntfs", "fat32"}},                                              // gzip checkpoints; the 32 MiB run evicts and re-seeks
 		{"mbr/disk.img.xz", []string{"ext4", "ntfs", "fat32"}},                                              // 25 xz blocks
 		{"vhd-zstd.squashfs", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat", "ext4", "ntfs", "fat32"}}, // gpt.vhdx (386M) then mbr-dyn.vhd (200M)
-		{"manifest.sha256", nil}, // neither squashfs nor image: no volumes, no error
+		{"bare-ext4.tib", []string{"ext4"}},                                                                 // Acronis TI 2014 partition backup (synthesized)
+		{"bare-ext4-frag.tib", []string{"ext4"}},                                                            // same, with an early chunk map fragment
+		{"manifest.sha256", nil},                                                                            // neither squashfs nor image: no volumes, no error
 	} {
 		for _, budget := range []int64{256 << 20, 32 << 20} { // 32 MiB: ~10x smaller than the image, forces eviction
 			vols, err := openStack(filepath.Join(dir, tc.file), budget, nil)

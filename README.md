@@ -2,7 +2,8 @@
 
 Mounts a disk image backup on Windows: a squashfs holding disk images, a
 VHD/VHDX, a raw MBR/GPT disk image, or a single-partition (bare filesystem)
-image, all detected by signature. It opens everything in-process, reads the
+image (optionally gzip/xz compressed), or an Acronis True Image `.tib`
+partition backup, all detected by signature. It opens everything in-process, reads the
 partition table and mounts every readable filesystem as its own read-only
 drive, from `Z:` downwards. Nothing is extracted, and no loop device is
 attached.
@@ -26,7 +27,7 @@ Always build with `-tags xz,zstd,lz4`, or xz/zstd/lz4-compressed squashfs files 
 
 ## Usage
 
-    backup-mounter.exe [flags] \\nas\share\backup.squashfs   # or disk.vhd, disk.vhdx, disk.img
+    backup-mounter.exe [flags] \\nas\share\backup.squashfs   # or disk.vhd, disk.vhdx, disk.img, disk.img.gz, disk.img.xz, backup.tib
 
 | flag | meaning |
 |---|---|
@@ -45,6 +46,9 @@ filesystem image.
 Squashfs compression: gzip, xz, zstd, lz4 (incl. `-Xhc`).
 
 Known gaps:
+- Acronis `.tib`: True Image 2014-2017 full partition backups only (unencrypted,
+  single volume). Incremental/differential, encrypted, TI 2018+ (and `.tibx`)
+  and TI 2013-or-older archives are refused with an error.
 - FAT12/16: not supported (skipped with a log line).
 - Symlinks (and devices, fifos) appear as empty files; NTFS reparse points
   appear as their plain file/dir. NTFS metafiles (`$MFT`, ...) are hidden.

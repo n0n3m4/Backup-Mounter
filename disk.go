@@ -48,6 +48,11 @@ func probe(r io.ReaderAt) string {
 
 // openVolumes splits a disk image into partitions and opens every one it can read.
 func openVolumes(name string, r io.ReaderAt, size int64) []volume {
+	r, size, err := unwrap(name, r, size)
+	if err != nil {
+		log.Printf("%s: %v, skipped", name, err)
+		return nil
+	}
 	parts := []*io.SectionReader{io.NewSectionReader(r, 0, size)}
 	if probe(r) == "" { // a bare filesystem has no partition table to read
 		list, err := gpt.List(r, size)
@@ -181,6 +186,8 @@ type fileInfo struct {
 	size  int64
 	mode  fs.FileMode
 	mtime time.Time
+	btime time.Time // creation, falls back to mtime
+	atime time.Time // last access, falls back to mtime
 }
 
 func (fi fileInfo) Name() string       { return fi.name }
@@ -188,18 +195,31 @@ func (fi fileInfo) Size() int64        { return fi.size }
 func (fi fileInfo) Mode() fs.FileMode  { return fi.mode }
 func (fi fileInfo) ModTime() time.Time { return fi.mtime }
 func (fi fileInfo) IsDir() bool        { return fi.mode.IsDir() }
-func (fi fileInfo) Sys() any           { return nil }
+func (fi fileInfo) Sys() any           { return sysInfo(fi) } // Windows: creation/access times for gofs, see mount_windows.go
 
-// newInfo maps a POSIX mode to a read-only FileInfo.
+// newInfo maps a POSIX mode to a read-only FileInfo. No zero time may leave here:
+// go-winfsp converts with UnixNano, which overflows for year 1 and shows as 1754.
+// A time at or before 1970 counts as missing (never recorded: Go zero, a zeroed
+// btrfs otime, an NTFS 1601 FILETIME): creation and access fall back to mtime, mtime to 1970.
 // ponytail: symlinks, devices and fifos show as 0-byte files; WinFsp reparse points if anyone needs them.
-func newInfo(name string, posixMode uint32, size int64, mtime time.Time) fileInfo {
+func newInfo(name string, posixMode uint32, size int64, mtime, btime, atime time.Time) fileInfo {
+	if mtime.Unix() <= 0 {
+		mtime = time.Unix(0, 0)
+	}
+	if btime.Unix() <= 0 {
+		btime = mtime
+	}
+	if atime.Unix() <= 0 {
+		atime = mtime
+	}
+	fi := fileInfo{name: name, mode: 0o444, mtime: mtime, btime: btime, atime: atime}
 	switch posixMode & 0xF000 {
 	case 0x4000:
-		return fileInfo{name, 0, fs.ModeDir | 0o555, mtime}
+		fi.mode = fs.ModeDir | 0o555
 	case 0x8000:
-		return fileInfo{name, size, 0o444, mtime}
+		fi.size = size
 	}
-	return fileInfo{name, 0, 0o444, mtime}
+	return fi
 }
 
 // file is an opened volume entry. ReadAt is what the mount layer uses.

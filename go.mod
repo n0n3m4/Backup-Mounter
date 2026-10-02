@@ -6,9 +6,12 @@ replace github.com/go-filesystems/btrfs => ./third_party/btrfs
 
 replace github.com/go-filesystems/exfat => ./third_party/exfat
 
+replace github.com/go-filesystems/fat32 => ./third_party/fat32
+
 require (
 	github.com/KarpelesLab/squashfs v1.2.0
 	github.com/aoiflux/libext v0.3.0
+	github.com/aoiflux/libvhdi v0.3.0
 	github.com/go-filesystems/btrfs v0.1.0
 	github.com/go-filesystems/exfat v0.3.1-0.20260924072827-4792096f9a7f
 	github.com/go-filesystems/fat32 v0.4.0

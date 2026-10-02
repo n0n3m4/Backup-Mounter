@@ -48,6 +48,38 @@ type rootDirEntry struct {
 	// NoFatChain bit decides how the entry's clusters are addressed, so every
 	// path that turns an entry into bytes has to carry it.
 	flags uint8
+
+	mtime, btime, atime time.Time // backup-mounter: modified, created, last-access
+}
+
+// Stat is what Stat returns: filesystem.Stat plus the entry's timestamps, which
+// the interface has no accessor for. Zero for the root directory. backup-mounter addition.
+type Stat struct {
+	filesystem.Stat
+	Mtime, Btime, Atime time.Time
+}
+
+// Times returns the last-write, creation and last-access times.
+func (s Stat) Times() (mtime, btime, atime time.Time) { return s.Mtime, s.Btime, s.Atime }
+
+// exfatDecodeTimestamp inverts exfatEncodeTimestamp. tenMs is the 10 ms
+// increment byte (0..199); utc is the UtcOffset byte: bit 7 = valid, low 7 bits =
+// signed 15-minute units. Without a valid offset the stamp is local time, as on FAT.
+func exfatDecodeTimestamp(ts uint32, tenMs, utc uint8) time.Time {
+	loc := time.Local
+	if utc&0x80 != 0 {
+		loc = time.FixedZone("", int(int8(utc<<1)>>1)*15*60)
+	}
+	return time.Date(1980+int(ts>>25), time.Month(ts>>21&0xF), int(ts>>16&0x1F),
+		int(ts>>11&0x1F), int(ts>>5&0x3F), int(ts&0x1F)*2+int(tenMs)/100, int(tenMs)%100*10_000_000, loc)
+}
+
+// exfatEntryTimes decodes the File directory entry's LastModified, Create and LastAccessed stamps.
+func exfatEntryTimes(entry []byte) (mtime, btime, atime time.Time) {
+	le := binary.LittleEndian
+	return exfatDecodeTimestamp(le.Uint32(entry[12:]), entry[21], entry[23]),
+		exfatDecodeTimestamp(le.Uint32(entry[8:]), entry[20], entry[22]),
+		exfatDecodeTimestamp(le.Uint32(entry[16:]), 0, entry[24])
 }
 
 // Info holds the fields decoded from the exFAT main boot sector.
@@ -214,7 +246,7 @@ func (fs *exfatFS) Stat(path string) (filesystem.Stat, error) {
 	if err != nil {
 		return nil, err
 	}
-	return filesystem.NewStat(entry.mode(), entry.size, uint64(entry.cluster)), nil
+	return Stat{filesystem.NewStat(entry.mode(), entry.size, uint64(entry.cluster)), entry.mtime, entry.btime, entry.atime}, nil
 }
 
 // ListDir lists the entries of the directory at path (any depth).
@@ -710,7 +742,9 @@ func parseRootDirMetadata(buf []byte) ([]rootDirEntry, error) {
 		firstCluster := le.Uint32(stream[20:24])
 		dataLength := le.Uint64(stream[24:32])
 		name := string(utf16.Decode(nameWords[:nameLen]))
-		entries = append(entries, rootDirEntry{name: name, attr: attrs, cluster: firstCluster, size: dataLength, flags: stream[1]})
+		e := rootDirEntry{name: name, attr: attrs, cluster: firstCluster, size: dataLength, flags: stream[1]}
+		e.mtime, e.btime, e.atime = exfatEntryTimes(entry)
+		entries = append(entries, e)
 		offset += secondaryCount * dirEntrySize
 	}
 	return entries, nil

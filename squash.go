@@ -37,7 +37,7 @@ func findImages(sq *squashfs.Superblock, names []string) ([]image, error) {
 			if err != nil {
 				return err
 			}
-			if isDiskImage(ino) {
+			if isDiskImage(ino, int64(ino.Size)) {
 				imgs = append(imgs, image{p, ino})
 			}
 			return nil
@@ -50,9 +50,12 @@ func findImages(sq *squashfs.Superblock, names []string) ([]image, error) {
 	return imgs, nil
 }
 
-// isDiskImage: MBR signature with a populated partition entry, a GPT header,
-// or a bare filesystem we can read.
-func isDiskImage(r io.ReaderAt) bool {
+// isDiskImage: a VHD/VHDX, an MBR signature with a populated partition entry,
+// a GPT header, or a bare filesystem we can read.
+func isDiskImage(r io.ReaderAt, size int64) bool {
+	if sniffContainer(r, size) != "" {
+		return true
+	}
 	var b [1024]byte
 	if n, _ := r.ReadAt(b[:], 0); n < len(b) {
 		return false

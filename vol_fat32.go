@@ -11,7 +11,8 @@ import (
 	filesystem "github.com/go-filesystems/interface"
 )
 
-// fatVol serves FAT32 and exFAT: the libraries expose no timestamps, so every mtime is zero.
+// fatVol serves FAT32 and exFAT. Timestamps come from the forks' Stat (third_party/{fat32,exfat}); the
+// upstream interface has none.
 type fatVol struct{ fs filesystem.Filesystem }
 
 func openFAT32(r *io.SectionReader) (fs.FS, string, error) {
@@ -45,7 +46,13 @@ func (v fatVol) stat(name string) (fileInfo, error) {
 	if err != nil {
 		return fileInfo{}, err
 	}
-	return newInfo(path.Base(name), uint32(st.Mode()), int64(st.Size()), time.Time{}), nil
+	var mtime, btime, atime time.Time // the root has no directory entry, so no times
+	if t, ok := st.(interface {
+		Times() (mtime, btime, atime time.Time)
+	}); ok {
+		mtime, btime, atime = t.Times()
+	}
+	return newInfo(path.Base(name), uint32(st.Mode()), int64(st.Size()), mtime, btime, atime), nil
 }
 
 // ponytail: one Stat (a path lookup) per entry, O(n²) in directory size; fine for an ESP, revisit for a 10k-file camera card.

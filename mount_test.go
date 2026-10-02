@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestFixtures runs the whole stack against testdata/make_fixtures.sh output:
@@ -25,6 +26,11 @@ func TestFixtures(t *testing.T) {
 	}
 	want := readManifest(t, filepath.Join(dir, "manifest.sha256"))
 	want["link"] = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" // ponytail symlink: empty file
+	st, err := os.Stat(filepath.Join(dir, "manifest.sha256"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	since := time.Date(st.ModTime().Year(), st.ModTime().Month(), st.ModTime().Day(), 0, 0, 0, 0, time.Local) // FAT access time is date-only, local
 
 	for _, tc := range []struct {
 		file  string
@@ -33,6 +39,13 @@ func TestFixtures(t *testing.T) {
 		{"gpt-zstd.squashfs", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat"}},
 		{"gpt-lz4.squashfs", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat"}},
 		{"mbr-gzip.squashfs", []string{"ext4", "ntfs", "fat32", "ext4"}}, // 2 logical partitions, then the bare image
+		{"gpt-dyn.vhd", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat"}},
+		{"gpt-fixed.vhd", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat"}},
+		{"gpt.vhdx", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat"}},
+		{"mbr/disk.img", []string{"ext4", "ntfs", "fat32"}}, // raw MBR disk as the top-level file
+		{"mbr/bare-ext4.img", []string{"ext4"}},            // single partition as the top-level file
+		{"vhd-zstd.squashfs", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat", "ext4", "ntfs", "fat32"}}, // gpt.vhdx (386M) then mbr-dyn.vhd (200M)
+		{"manifest.sha256", nil}, // neither squashfs nor image: no volumes, no error
 	} {
 		for _, budget := range []int64{256 << 20, 32 << 20} { // 32 MiB: ~10x smaller than the image, forces eviction
 			vols, err := openStack(filepath.Join(dir, tc.file), budget, nil)
@@ -50,6 +63,7 @@ func TestFixtures(t *testing.T) {
 				if want := map[string]string{"ext4": "ext4vol", "btrfs": "btrfsvol", "fat32": "FATVOL", "ntfs": "ntfsvol", "exfat": "EXFATVOL"}[v.kind]; v.label != want {
 					t.Errorf("%s: label %q, want %q", v.name, v.label, want)
 				}
+				checkTimes(t, v, since)
 				root, err := fs.ReadDir(v.fsys, ".")
 				if err != nil {
 					t.Fatalf("%s: root listing: %v", v.name, err)
@@ -155,4 +169,35 @@ func checkFiles(t *testing.T, v volume, want map[string]string) {
 	if len(got) != len(want) {
 		t.Errorf("%s: walked %d files, want %d", v.name, len(got), len(want))
 	}
+}
+
+// checkTimes requires every entry's modify, create and access time (from both
+// ReadDir and Stat) to fall inside the fixture build window: a zero time, a
+// misdecoded one (1754, 1980) or a wrong time zone all land outside it.
+func checkTimes(t *testing.T, v volume, since time.Time) {
+	now := time.Now().Add(5 * time.Second)
+	fs.WalkDir(v.fsys, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			t.Errorf("%s: walk %s: %v", v.name, p, err)
+			return nil
+		}
+		if p == "." {
+			return nil // FAT roots have no directory entry, hence no times
+		}
+		listed, _ := d.Info()
+		stated, err := fs.Stat(v.fsys, p)
+		if err != nil {
+			t.Errorf("%s: stat %s: %v", v.name, p, err)
+			return nil
+		}
+		for _, fi := range []fs.FileInfo{listed, stated} {
+			i := fi.(fileInfo)
+			for what, ts := range map[string]time.Time{"mtime": i.mtime, "btime": i.btime, "atime": i.atime} {
+				if ts.Before(since) || ts.After(now) {
+					t.Errorf("%s: %s: %s %v outside [%v, %v]", v.name, p, what, ts, since, now)
+				}
+			}
+		}
+		return nil
+	})
 }

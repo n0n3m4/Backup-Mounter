@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/winfsp/go-winfsp"
 	"github.com/winfsp/go-winfsp/gofs"
@@ -73,6 +74,13 @@ func mount(vols []volume, debug bool) error {
 	<-sig
 	log.Printf("unmounting")
 	return nil
+}
+
+// sysInfo hands gofs separate creation and access times: it takes them only
+// from a Win32FileAttributeData, otherwise every stamp is ModTime.
+func sysInfo(fi fileInfo) any {
+	ft := func(t time.Time) syscall.Filetime { return syscall.NsecToFiletime(t.UnixNano()) }
+	return &syscall.Win32FileAttributeData{CreationTime: ft(fi.btime), LastAccessTime: ft(fi.atime), LastWriteTime: ft(fi.mtime)}
 }
 
 // winFS adapts an fs.FS volume to gofs.FileSystem: read-only, with

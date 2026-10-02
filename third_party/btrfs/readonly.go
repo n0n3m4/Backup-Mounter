@@ -52,6 +52,8 @@ type ROInfo struct {
 	Mode  uint16 // POSIX mode incl. S_IFMT bits
 	Size  uint64
 	MTime time.Time
+	ATime time.Time
+	OTime time.Time // creation
 	Tree  uint64
 	Ino   uint64
 }
@@ -160,10 +162,13 @@ func (ro *RO) inode(tree, ino uint64) (ROInfo, error) {
 		return ROInfo{}, fmt.Errorf("btrfs: inode %d: INODE_ITEM too short", ino)
 	}
 	le := binary.LittleEndian
+	readTime := func(off int) time.Time { return time.Unix(int64(le.Uint64(d[off:])), int64(le.Uint32(d[off+8:]))) }
 	return ROInfo{
 		Mode:  uint16(le.Uint32(d[inodeOffMode:])),
 		Size:  le.Uint64(d[inodeOffSize:]),
-		MTime: time.Unix(int64(le.Uint64(d[inodeOffMTime:])), int64(le.Uint32(d[inodeOffMTime+8:]))),
+		MTime: readTime(inodeOffMTime),
+		ATime: readTime(inodeOffATime),
+		OTime: readTime(inodeOffOTime),
 		Tree:  tree,
 		Ino:   ino,
 	}, nil

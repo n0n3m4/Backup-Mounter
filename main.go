@@ -1,6 +1,6 @@
-// Command backup-mounter mounts every filesystem inside the disk images of a
-// squashfs backup as a read-only Windows drive (via WinFsp), without
-// extracting anything.
+// Command backup-mounter mounts every filesystem inside a disk image (raw,
+// VHD/VHDX, bare partition, or any of those inside a squashfs backup) as a
+// read-only Windows drive (via WinFsp), without extracting anything.
 package main
 
 import (
@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -29,7 +30,7 @@ func main() {
 	walk := flag.Bool("walk", false, "print path, size and sha256 of every file instead of mounting")
 	debug := flag.Bool("debug", false, "verbose WinFsp logging")
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "usage: %s [flags] backup.squashfs\n", os.Args[0])
+		fmt.Fprintf(flag.CommandLine.Output(), "usage: %s [flags] backup.squashfs|disk.vhd|disk.vhdx|disk.img\n", os.Args[0])
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -65,7 +66,8 @@ func main() {
 }
 
 // openStack: file -> raw chunk cache -> squashfs -> disk images ->
-// decompressed chunk cache -> partitions -> volumes.
+// decompressed chunk cache -> VHD/VHDX unwrap -> partitions -> volumes.
+// A file that is not a squashfs is treated as the disk image itself.
 func openStack(path string, budget int64, images []string) ([]volume, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -74,6 +76,13 @@ func openStack(path string, budget int64, images []string) ([]volume, error) {
 	st, err := f.Stat()
 	if err != nil {
 		return nil, err
+	}
+	var magic [4]byte
+	if n, _ := f.ReadAt(magic[:], 0); string(magic[:n]) != "hsqs" { // squashfs little-endian magic
+		if len(images) > 0 {
+			return nil, fmt.Errorf("%s: not a squashfs, --image does not apply", path)
+		}
+		return openVolumes(filepath.Base(path), newChunkCache(f, st.Size(), 4<<20, budget), st.Size()), nil
 	}
 	sq, err := squashfs.New(newChunkCache(f, st.Size(), 4<<20, budget/8*7))
 	if err != nil {

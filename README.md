@@ -1,9 +1,11 @@
 # backup-mounter
 
-Mounts a squashfs backup of a whole disk on Windows. It opens the squashfs
-in-process, finds the raw disk image(s) inside, reads the MBR/GPT partition
-table and mounts every readable filesystem as its own read-only drive, from
-`Z:` downwards. Nothing is extracted, and no VHD or loop device is attached.
+Mounts a disk image backup on Windows: a squashfs holding disk images, a
+VHD/VHDX, a raw MBR/GPT disk image, or a single-partition (bare filesystem)
+image, all detected by signature. It opens everything in-process, reads the
+partition table and mounts every readable filesystem as its own read-only
+drive, from `Z:` downwards. Nothing is extracted, and no loop device is
+attached.
 
 A RAM cache (default 8 GB) keeps reads from a NAS large and sequential:
 7/8 holds raw squashfs bytes in 4 MiB chunks, 1/8 holds decompressed
@@ -17,19 +19,19 @@ squashfs blocks.
 ## Build
 
     make build      # backup-mounter.exe (CGO_ENABLED=0 GOOS=windows, -tags xz,zstd,lz4)
-    make fixtures   # test images, needs mkfs.ext4/btrfs/vfat/ntfs/exfat, sgdisk, parted, mksquashfs
+    make fixtures   # test images, needs mkfs.ext4/btrfs/vfat/ntfs/exfat, sgdisk, parted, mksquashfs, qemu-img
     make test
 
 Always build with `-tags xz,zstd,lz4`, or xz/zstd/lz4-compressed squashfs files won't open.
 
 ## Usage
 
-    backup-mounter.exe [flags] \\nas\share\backup.squashfs
+    backup-mounter.exe [flags] \\nas\share\backup.squashfs   # or disk.vhd, disk.vhdx, disk.img
 
 | flag | meaning |
 |---|---|
 | `--cache 8G` | RAM cache budget (`512M`, `16G`, ...) |
-| `--image path` | disk image inside the squashfs; repeatable; default auto-detects every file with an MBR/GPT or a bare filesystem, largest first |
+| `--image path` | disk image inside the squashfs; repeatable; default auto-detects every VHD/VHDX, MBR/GPT disk or bare filesystem, largest first |
 | `--walk` | instead of mounting, print path, size and sha256 of every file (also works on Linux, which never mounts) |
 | `--debug` | WinFsp debug log |
 

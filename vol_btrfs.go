@@ -21,7 +21,7 @@ func openBtrfs(r *io.SectionReader) (fs.FS, string, error) {
 }
 
 func btrfsInfo(i btrfs.ROInfo) fileInfo {
-	return newInfo(i.Name, uint32(i.Mode), int64(i.Size), i.MTime)
+	return newInfo(i.Name, uint32(i.Mode), int64(i.Size), i.MTime, i.OTime, i.ATime)
 }
 
 func (v btrfsVol) stat(name string) (fileInfo, error) {

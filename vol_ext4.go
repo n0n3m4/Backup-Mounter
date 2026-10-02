@@ -29,7 +29,7 @@ func (v ext4Vol) inode(name string) (libext.Inode, error) {
 
 func (v ext4Vol) stat(name string) (fileInfo, error) {
 	in, err := v.inode(name)
-	return newInfo(path.Base(name), uint32(in.Mode), int64(in.Size), in.Mtime), err
+	return newInfo(path.Base(name), uint32(in.Mode), int64(in.Size), in.Mtime, in.Crtime, in.Atime), err
 }
 
 func (v ext4Vol) readDir(name string) ([]fileInfo, error) {
@@ -43,7 +43,7 @@ func (v ext4Vol) readDir(name string) ([]fileInfo, error) {
 	}
 	out := make([]fileInfo, 0, len(entries))
 	for _, e := range entries {
-		out = append(out, newInfo(e.Name, uint32(e.Mode), int64(e.Size), e.Times.Mtime))
+		out = append(out, newInfo(e.Name, uint32(e.Mode), int64(e.Size), e.Times.Mtime, e.Times.Crtime, e.Times.Atime))
 	}
 	return out, nil
 }

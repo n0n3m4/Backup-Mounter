@@ -60,13 +60,13 @@ func (v ntfsVol) entry(name string) (*parser.MFT_ENTRY, error) {
 	return root.Open(v.ctx, name)
 }
 
-func ntfsInfo(name string, isDir bool, size int64, mtime time.Time) fileInfo {
+func ntfsInfo(name string, isDir bool, size int64, mtime, btime, atime time.Time) fileInfo {
 	mode := uint32(0x8000)
 	if isDir {
 		mode = 0x4000
 	}
 	// ponytail: reparse points (symlinks/junctions) look like plain files or dirs.
-	return newInfo(name, mode, size, mtime)
+	return newInfo(name, mode, size, mtime, btime, atime)
 }
 
 func (v ntfsVol) stat(name string) (fileInfo, error) {
@@ -76,14 +76,14 @@ func (v ntfsVol) stat(name string) (fileInfo, error) {
 	if err != nil {
 		return fileInfo{}, fmt.Errorf("%s: %w", err, fs.ErrNotExist)
 	}
-	if name == "." {
-		return newInfo(".", 0x4000, 0, time.Time{}), nil
-	}
 	// Stat returns one FileInfo per name (hard links) and per data stream;
 	// the first is the unnamed stream under the primary name. Prefer the
 	// entry carrying the name we were asked for.
 	infos := parser.Stat(v.ctx, e)
 	if len(infos) == 0 {
+		if name == "." {
+			return newInfo(".", 0x4000, 0, time.Time{}, time.Time{}, time.Time{}), nil
+		}
 		return fileInfo{}, fmt.Errorf("ntfs: no metadata for %q", name)
 	}
 	fi := infos[0]
@@ -93,7 +93,7 @@ func (v ntfsVol) stat(name string) (fileInfo, error) {
 			break
 		}
 	}
-	return ntfsInfo(path.Base(name), fi.IsDir, fi.Size, fi.Mtime), nil
+	return ntfsInfo(path.Base(name), fi.IsDir, fi.Size, fi.Mtime, fi.Btime, fi.Atime), nil
 }
 
 // readDir lists the directory's own $I30 index, so a hard-linked file shows
@@ -119,7 +119,7 @@ func (v ntfsVol) readDir(name string) ([]fileInfo, error) {
 		seen[ref] = true
 		const fileNameDirFlag = 0x10000000 // FILE_NAME.Flags bit go-ntfs doesn't name
 		isDir := parser.ParseUint32(fn.Reader, fn.Profile.Off_FILE_NAME_Flags+fn.Offset)&fileNameDirFlag != 0
-		out = append(out, ntfsInfo(fn.Name(), isDir, int64(fn.FilenameSize()), fn.File_modified().Time))
+		out = append(out, ntfsInfo(fn.Name(), isDir, int64(fn.FilenameSize()), fn.File_modified().Time, fn.Created().Time, fn.File_accessed().Time))
 	}
 	return out, nil
 }

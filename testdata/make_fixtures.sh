@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds test fixtures without root: filesystems are populated by the mkfs
 # tools themselves, laid into partitioned disk images with dd, then wrapped in
-# squashfs. Usage: testdata/make_fixtures.sh OUTDIR, then
+# squashfs; VHD/VHDX copies via qemu-img. Usage: testdata/make_fixtures.sh OUTDIR, then
 # BM_FIXTURES=OUTDIR go test -tags xz,zstd,lz4 ./...
 set -eu
 OUT=${1:?usage: make_fixtures.sh OUTDIR}
@@ -9,7 +9,7 @@ mkdir -p "$OUT"
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$OUT"
 populate() { go -C "$ROOT" run ./testdata/populate "$1" "$PWD/$2" "$PWD/src"; } # FAT kinds: no mtools, so the readers' own libraries write
-rm -rf src gpt mbr ./*.img ./*.squashfs manifest.sha256
+rm -rf src gpt mbr vhd ./*.img ./*.vhd ./*.vhdx ./*.squashfs manifest.sha256
 
 # --- source tree (ext4 and btrfs get a copy; manifest lists regular files) ---
 mkdir -p src/dir/sub src/empty src/vol1/inner src/dir/vol2
@@ -60,8 +60,17 @@ put ntfs.img mbr/disk.img 66
 put fat32.img mbr/disk.img 131
 cp ext4.img mbr/bare-ext4.img
 
+# --- VHD/VHDX: top-level copies of the GPT disk, plus a squashfs holding one of each ---
+qemu-img convert -q -f raw -O vpc -o subformat=dynamic,force_size=on gpt/disk.img gpt-dyn.vhd
+qemu-img convert -q -f raw -O vpc -o subformat=fixed,force_size=on gpt/disk.img gpt-fixed.vhd
+qemu-img convert -q -f raw -O vhdx -o subformat=dynamic gpt/disk.img gpt.vhdx
+mkdir vhd
+cp gpt.vhdx vhd/
+qemu-img convert -q -f raw -O vpc -o subformat=dynamic,force_size=on mbr/disk.img vhd/mbr-dyn.vhd
+
 mksquashfs gpt gpt-zstd.squashfs -comp zstd -b 1M -noappend -quiet -no-progress
 mksquashfs gpt gpt-lz4.squashfs -comp lz4 -Xhc -b 1M -noappend -quiet -no-progress
 mksquashfs mbr mbr-gzip.squashfs -comp gzip -b 1M -noappend -quiet -no-progress
-rm -rf gpt mbr ext4.img btrfs.img fat32.img ntfs.img exfat.img
+mksquashfs vhd vhd-zstd.squashfs -comp zstd -b 1M -noappend -quiet -no-progress
+rm -rf gpt vhd ext4.img btrfs.img fat32.img ntfs.img exfat.img # mbr/ stays: raw disk + bare partition, tested as top-level files
 ls -l "$OUT"

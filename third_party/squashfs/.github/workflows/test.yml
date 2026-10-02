@@ -1,0 +1,114 @@
+name: Test
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+jobs:
+  test:
+    name: Test Go ${{ matrix.go-version }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        go-version: ['1.25']
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest, windows-latest]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+      with:
+        lfs: true
+
+    - name: Set up Go
+      uses: actions/setup-go@v6
+      with:
+        go-version: ${{ matrix.go-version }}
+
+    - name: Install dependencies (Linux)
+      if: runner.os == 'Linux'
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libfuse-dev squashfs-tools
+
+    - name: Install dependencies (macOS)
+      if: runner.os == 'macOS'
+      run: |
+        brew install --cask macfuse
+        brew install squashfs
+
+    - name: Build
+      run: go build -v ./...
+
+    - name: Run tests (default)
+      run: go test -v ./...
+
+    - name: Run tests (with fuse)
+      if: runner.os != 'Windows'
+      run: go test -v -tags fuse ./...
+
+    - name: Run tests (with xz and zstd)
+      run: go test -v -tags "xz zstd" ./...
+
+    - name: Run tests (all tags)
+      if: runner.os != 'Windows'
+      run: go test -v -tags "fuse xz zstd" ./...
+
+    - name: Run go vet
+      run: go vet ./...
+
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+      with:
+        lfs: true
+
+    - name: Set up Go
+      uses: actions/setup-go@v6
+      with:
+        go-version: '1.25'
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libfuse-dev squashfs-tools
+
+    - name: golangci-lint
+      uses: golangci/golangci-lint-action@v9
+      with:
+        version: latest
+        args: --build-tags "fuse xz zstd"
+
+  coverage:
+    name: Coverage
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v6
+      with:
+        lfs: true
+
+    - name: Set up Go
+      uses: actions/setup-go@v6
+      with:
+        go-version: '1.25'
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y libfuse-dev squashfs-tools
+
+    - name: Run tests with coverage
+      run: go test -v -tags "fuse xz zstd" -covermode=count -coverprofile=coverage.out ./...
+
+    - name: Send coverage to Coveralls
+      uses: coverallsapp/github-action@v2
+      with:
+        file: coverage.out
+        format: golang

@@ -33,6 +33,11 @@ func TestFixtures(t *testing.T) {
 	}
 	writeTib(t, img, filepath.Join(dir, "bare-ext4.tib"), 0)
 	writeTib(t, img, filepath.Join(dir, "bare-ext4-frag.tib"), 135) // early chunk map fragment, as in TI's own backups
+	// three extents over flat-flat.vmdk: a split inside the NTFS partition, then the unpartitioned last MiB as ZERO
+	multi := "# Disk DescriptorFile\nparentCID=ffffffff\ncreateType=\"custom\"\nRW 150001 FLAT \"flat-flat.vmdk\" 0\nRW 257551 FLAT \"flat-flat.vmdk\" 150001\nRW 2048 ZERO\n"
+	if err := os.WriteFile(filepath.Join(dir, "vmdk/multi.vmdk"), []byte(multi), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	want := readManifest(t, filepath.Join(dir, "manifest.sha256"))
 	want["link"] = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" // ponytail symlink: empty file
 	st, err := os.Stat(filepath.Join(dir, "manifest.sha256"))
@@ -58,7 +63,16 @@ func TestFixtures(t *testing.T) {
 		{"vhd-zstd.squashfs", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat", "ext4", "ntfs", "fat32"}}, // gpt.vhdx (386M) then mbr-dyn.vhd (200M)
 		{"bare-ext4.tib", []string{"ext4"}},                                                                 // Acronis TI 2014 partition backup (synthesized)
 		{"bare-ext4-frag.tib", []string{"ext4"}},                                                            // same, with an early chunk map fragment
-		{"manifest.sha256", nil},                                                                            // neither squashfs nor image: no volumes, no error
+		{"gpt.qcow2", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat"}},
+		{"gpt-zlib.qcow2", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat"}},
+		{"gpt-zstd.qcow2", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat"}},
+		{"vmdk/sparse.vmdk", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat"}}, // monolithicSparse
+		{"vmdk/stream.vmdk", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat"}}, // streamOptimized: zlib grains, footer GD
+		{"vmdk/flat.vmdk", []string{"ext4", "ntfs", "fat32"}},                     // descriptor + flat-flat.vmdk
+		{"vmdk/split-s.vmdk", []string{"ext4", "ntfs", "fat32"}},                  // descriptor + sparse split-s-s001.vmdk
+		{"vmdk/split-f.vmdk", []string{"ext4", "ntfs", "fat32"}},                  // descriptor + flat split-f-f001.vmdk
+		{"vmdk/multi.vmdk", []string{"ext4", "ntfs", "fat32"}},                    // reads straddle FLAT extents, ZERO tail
+		{"manifest.sha256", nil}, // neither squashfs nor image: no volumes, no error
 	} {
 		for _, budget := range []int64{256 << 20, 32 << 20} { // 32 MiB: ~10x smaller than the image, forces eviction
 			vols, err := openStack(filepath.Join(dir, tc.file), budget, nil)
@@ -109,6 +123,31 @@ func TestSingleBlockXZ(t *testing.T) {
 	}
 	if _, err := openStack(filepath.Join(dir, "mbr/single.img.xz"), 32<<20, nil); err == nil || !strings.Contains(err.Error(), "single-block") {
 		t.Fatalf("err = %v, want single-block xz error", err)
+	}
+}
+
+func TestContainerErrors(t *testing.T) {
+	dir := os.Getenv("BM_FIXTURES")
+	if dir == "" {
+		t.Skip("BM_FIXTURES not set")
+	}
+	tmp := t.TempDir()
+	write := func(name, data string) string {
+		p := filepath.Join(tmp, name)
+		if err := os.WriteFile(p, []byte(data), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+	for _, tc := range []struct{ path, want string }{
+		{filepath.Join(dir, "overlay.qcow2"), "backing file"},
+		{write("cowd.vmdk", "COWD\x01\x00\x00\x00"), "not supported"},
+		{write("missing.vmdk", "# Disk DescriptorFile\nversion=1\nparentCID=ffffffff\ncreateType=\"monolithicFlat\"\nRW 2048 FLAT \"gone-flat.vmdk\" 0\n"), "gone-flat.vmdk"},
+		{write("delta.vmdk", "# Disk DescriptorFile\nversion=1\nparentCID=1234abcd\nparentFileNameHint=\"base.vmdk\"\nRW 2048 SPARSE \"delta-s001.vmdk\"\n"), "parent not supported"},
+	} {
+		if _, err := openStack(tc.path, 32<<20, nil); err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Errorf("%s: err = %v, want %q", filepath.Base(tc.path), err, tc.want)
+		}
 	}
 }
 

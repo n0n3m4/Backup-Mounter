@@ -23,20 +23,34 @@ import (
 // indexSpan is the uncompressed distance between gzip checkpoints (a variable so the test can shrink it).
 var indexSpan int64 = 16 << 20
 
-// openCompressed returns the decompressed contents of a gzip or xz file, or the
-// partition inside an Acronis .tib, as a random-access reader; ok=false means f
-// is none of them and the caller carries on.
+// openCompressed returns the decompressed contents of a gzip or xz file, the
+// partition inside an Acronis .tib, or the virtual disk of a qcow2 or VMDK, as a
+// random-access reader; ok=false means f is none of them and the caller carries on.
 //
-//	gzip/xz: raw chunkCache (1/8 budget) -> spanReader (one live decoder) -> decompressed chunkCache (7/8)
-//	.tib:    file (blocks are random-access) -> tibReader -> decompressed chunkCache (whole budget, chunk = block)
+//	gzip/xz:     raw chunkCache (1/8 budget) -> spanReader (one live decoder) -> decompressed chunkCache (7/8)
+//	.tib:        file (blocks are random-access) -> tibReader -> decompressed chunkCache (whole budget, chunk = block)
+//	qcow2/VMDK:  raw chunkCache (1/8) -> qcow2 / vmdk reader (+ sibling extent files) -> decompressed chunkCache (7/8)
 func openCompressed(path string, f *os.File, st os.FileInfo, budget int64) (r io.ReaderAt, size int64, ok bool, err error) {
-	var magic [6]byte
+	var magic [32]byte
 	n, _ := f.ReadAt(magic[:], 0)
 	var s *spanReader
 	switch {
+	case bytes.HasPrefix(magic[:n], []byte("QFI\xfb")), bytes.HasPrefix(magic[:n], []byte("KDMV")), bytes.HasPrefix(magic[:n], []byte(vmdkDescMagic)):
+		raw := newChunkCache(f, st.Size(), 4<<20, budget/8)
+		if magic[0] == 'Q' {
+			r, size, err = openQcow2(filepath.Base(path), raw)
+		} else {
+			r, size, err = openVMDK(path, raw, st.Size())
+		}
+		if err != nil {
+			return nil, 0, true, fmt.Errorf("%s: %w", path, err)
+		}
+		return newChunkCache(r, size, 4<<20, budget/8*7), size, true, nil
+	case bytes.HasPrefix(magic[:n], []byte("COWD")):
+		return nil, 0, true, fmt.Errorf("%s: COWD sparse VMDK (ESX vmfsSparse / Workstation 3) not supported", path)
 	case n >= 2 && string(magic[:2]) == "\x1f\x8b":
 		s, err = openGzip(path, f, st, newChunkCache(f, st.Size(), 4<<20, budget/8))
-	case n == 6 && string(magic[:]) == "\xfd7zXZ\x00":
+	case n >= 6 && string(magic[:6]) == "\xfd7zXZ\x00":
 		s, err = openXZ(path, newChunkCache(f, st.Size(), 4<<20, budget/8), st.Size())
 	case n >= 4 && string(magic[:4]) == "\xce\x24\xb9\xa2": // Acronis .tib
 		t, err := openTib(filepath.Base(path), f, st.Size())

@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds test fixtures without root: filesystems are populated by the mkfs
 # tools themselves, laid into partitioned disk images with dd, then wrapped in
-# squashfs; VHD/VHDX copies via qemu-img. Usage: testdata/make_fixtures.sh OUTDIR, then
+# squashfs; VHD/VHDX, qcow2 and VMDK copies via qemu-img. Usage: testdata/make_fixtures.sh OUTDIR, then
 # BM_FIXTURES=OUTDIR go test -tags xz,zstd,lz4 ./...
 set -eu
 OUT=${1:?usage: make_fixtures.sh OUTDIR}
@@ -9,7 +9,7 @@ mkdir -p "$OUT"
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$OUT"
 populate() { go -C "$ROOT" run ./testdata/populate "$1" "$PWD/$2" "$PWD/src"; } # FAT kinds: no mtools, so the readers' own libraries write
-rm -rf src gpt mbr vhd ./*.img ./*.vhd ./*.vhdx ./*.squashfs manifest.sha256
+rm -rf src gpt mbr vhd vmdk ./*.img ./*.vhd ./*.vhdx ./*.qcow2 ./*.squashfs manifest.sha256
 
 # --- source tree (ext4 and btrfs get a copy; manifest lists regular files) ---
 mkdir -p src/dir/sub src/empty src/vol1/inner src/dir/vol2
@@ -67,6 +67,18 @@ qemu-img convert -q -f raw -O vhdx -o subformat=dynamic gpt/disk.img gpt.vhdx
 mkdir vhd
 cp gpt.vhdx vhd/
 qemu-img convert -q -f raw -O vpc -o subformat=dynamic,force_size=on mbr/disk.img vhd/mbr-dyn.vhd
+
+# --- qcow2 (plain, zlib, zstd; an overlay with a backing file must be refused) and every VMDK subformat ---
+qemu-img convert -q -f raw -O qcow2 gpt/disk.img gpt.qcow2
+qemu-img convert -q -f raw -O qcow2 -c gpt/disk.img gpt-zlib.qcow2
+qemu-img convert -q -f raw -O qcow2 -c -o compression_type=zstd gpt/disk.img gpt-zstd.qcow2
+qemu-img create -q -f qcow2 -b gpt.qcow2 -F qcow2 overlay.qcow2
+mkdir vmdk
+qemu-img convert -q -f raw -O vmdk -o subformat=monolithicSparse gpt/disk.img vmdk/sparse.vmdk
+qemu-img convert -q -f raw -O vmdk -o subformat=streamOptimized gpt/disk.img vmdk/stream.vmdk
+qemu-img convert -q -f raw -O vmdk -o subformat=monolithicFlat mbr/disk.img vmdk/flat.vmdk           # + flat-flat.vmdk
+qemu-img convert -q -f raw -O vmdk -o subformat=twoGbMaxExtentSparse mbr/disk.img vmdk/split-s.vmdk # + split-s-s001.vmdk
+qemu-img convert -q -f raw -O vmdk -o subformat=twoGbMaxExtentFlat mbr/disk.img vmdk/split-f.vmdk   # + split-f-f001.vmdk
 
 mksquashfs gpt gpt-zstd.squashfs -comp zstd -b 1M -noappend -quiet -no-progress
 mksquashfs gpt gpt-lz4.squashfs -comp lz4 -Xhc -b 1M -noappend -quiet -no-progress

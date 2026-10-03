@@ -17,6 +17,8 @@ require (
 	github.com/go-filesystems/fat32 v0.4.0
 	github.com/go-filesystems/interface v0.3.0
 	github.com/go-volumes/gpt v0.2.0
+	github.com/klauspost/compress v1.18.6
+	github.com/lima-vm/go-qcow2reader v0.8.0
 	github.com/unxed/xz v0.1.47
 	github.com/winfsp/go-winfsp v1.0.4
 	golang.org/x/sys v0.48.0
@@ -31,7 +33,6 @@ require (
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/go-volumes/safeio v0.0.0-20260831125406-d8f54b2890d4 // indirect
 	github.com/hanwen/go-fuse/v2 v2.1.0 // indirect
-	github.com/klauspost/compress v1.18.6 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/pierrec/lz4/v4 v4.1.32 // indirect
 	github.com/pkg/errors v0.9.1 // indirect

@@ -1,7 +1,7 @@
 // Command backup-mounter mounts every filesystem inside a disk image (raw,
 // VHD/VHDX, bare partition, any of those inside a squashfs backup, or a raw/VHD
-// image compressed with gzip or multi-block xz, or an Acronis True Image .tib
-// partition backup) as a
+// image compressed with gzip or multi-block xz, an Acronis True Image .tib
+// partition backup, or a qcow2 or VMDK virtual disk) as a
 // read-only Windows drive (via WinFsp), without extracting anything.
 package main
 
@@ -32,7 +32,7 @@ func main() {
 	walk := flag.Bool("walk", false, "print path, size and sha256 of every file instead of mounting")
 	debug := flag.Bool("debug", false, "verbose WinFsp logging")
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "usage: %s [flags] backup.squashfs|disk.vhd|disk.vhdx|disk.img|disk.img.gz|disk.img.xz|backup.tib\n", os.Args[0])
+		fmt.Fprintf(flag.CommandLine.Output(), "usage: %s [flags] backup.squashfs|disk.vhd|disk.vhdx|disk.img|disk.img.gz|disk.img.xz|backup.tib|disk.qcow2|disk.vmdk\n", os.Args[0])
 		flag.PrintDefaults()
 	}
 	flag.Parse()

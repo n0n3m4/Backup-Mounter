@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"io"
 	"math/rand"
 	"sync"
 	"sync/atomic"
@@ -64,5 +65,27 @@ func TestChunkCache(t *testing.T) {
 	wg.Wait()
 	if got := under.reads.Load() - before; got != 1 {
 		t.Errorf("50 concurrent reads of one chunk did %d underlying reads, want 1", got)
+	}
+}
+
+// A read far into a span caches the whole chunks the live decoder passes on the way.
+func TestSpanGapFill(t *testing.T) {
+	src := make([]byte, 10<<20)
+	rand.New(rand.NewSource(2)).Read(src)
+	s := &spanReader{size: int64(len(src)), starts: []int64{0},
+		open: func(int) (io.Reader, error) { return bytes.NewReader(src), nil }}
+	s.cache = newChunkCache(s, s.size, 1<<20, 64<<20)
+	p := make([]byte, 100)
+	if _, err := s.cache.ReadAt(p, 5<<20+7); err != nil || !bytes.Equal(p, src[5<<20+7:][:100]) {
+		t.Fatalf("ReadAt: %v", err)
+	}
+	for i := int64(0); i <= 5; i++ {
+		e, ok := s.cache.m[i]
+		if !ok {
+			t.Fatalf("chunk %d not cached", i)
+		}
+		if !bytes.Equal(e.data, src[i<<20:(i+1)<<20]) {
+			t.Fatalf("chunk %d: wrong bytes", i)
+		}
 	}
 }

@@ -80,15 +80,33 @@ func (c *chunkCache) get(idx int64) ([]byte, error) {
 	if err != nil {
 		delete(c.m, idx) // don't cache failures; the next reader retries
 	} else {
-		e.el = c.lru.PushFront(e)
-		c.used += int64(len(buf))
-		for c.used > c.budget {
-			old := c.lru.Remove(c.lru.Back()).(*cacheEntry)
-			delete(c.m, old.idx)
-			c.used -= int64(len(old.data))
-		}
+		c.insert(e)
 	}
 	c.mu.Unlock()
 	close(e.done)
 	return e.data, e.err
+}
+
+// put caches a chunk somebody else already decoded (spanReader's gap fill); a chunk present or in flight wins.
+func (c *chunkCache) put(idx int64, data []byte) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, ok := c.m[idx]; ok {
+		return
+	}
+	e := &cacheEntry{idx: idx, data: data, done: make(chan struct{})}
+	close(e.done)
+	c.m[idx] = e
+	c.insert(e)
+}
+
+// insert adds a filled entry to the LRU and evicts down to the budget. c.mu held.
+func (c *chunkCache) insert(e *cacheEntry) {
+	e.el = c.lru.PushFront(e)
+	c.used += int64(len(e.data))
+	for c.used > c.budget {
+		old := c.lru.Remove(c.lru.Back()).(*cacheEntry)
+		delete(c.m, old.idx)
+		c.used -= int64(len(old.data))
+	}
 }

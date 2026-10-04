@@ -2,10 +2,12 @@
 // VHD/VHDX, bare partition, any of those inside a squashfs backup, or a raw/VHD
 // image compressed with gzip or multi-block xz, an Acronis True Image .tib
 // partition backup, or a qcow2 or VMDK virtual disk) as a
-// read-only Windows drive (via WinFsp), without extracting anything.
+// read-only Windows drive (via WinFsp), without extracting anything. A tar
+// (plain, .gz or multi-block .xz) or 7z archive is mounted as one drive.
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"flag"
 	"fmt"
@@ -32,7 +34,7 @@ func main() {
 	walk := flag.Bool("walk", false, "print path, size and sha256 of every file instead of mounting")
 	debug := flag.Bool("debug", false, "verbose WinFsp logging")
 	flag.Usage = func() {
-		fmt.Fprintf(flag.CommandLine.Output(), "usage: %s [flags] backup.squashfs|disk.vhd|disk.vhdx|disk.img|disk.img.gz|disk.img.xz|backup.tib|disk.qcow2|disk.vmdk\n", os.Args[0])
+		fmt.Fprintf(flag.CommandLine.Output(), "usage: %s [flags] backup.squashfs|disk.vhd|disk.vhdx|disk.img|disk.img.gz|disk.img.xz|backup.tib|disk.qcow2|disk.vmdk|backup.tar[.gz|.xz]|backup.7z\n", os.Args[0])
 		flag.PrintDefaults()
 	}
 	flag.Parse()
@@ -70,7 +72,8 @@ func main() {
 // openStack: file -> raw chunk cache -> squashfs -> disk images ->
 // decompressed chunk cache -> VHD/VHDX unwrap -> partitions -> volumes.
 // A file that is not a squashfs is treated as the disk image itself, after
-// gzip/xz decompression (compressed.go) when it is one of those.
+// gzip/xz decompression (compressed.go) when it is one of those; a 7z or a
+// (decompressed) tar becomes a single archive volume instead (archive.go, sevenzip.go).
 func openStack(path string, budget int64, images []string) ([]volume, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -80,18 +83,34 @@ func openStack(path string, budget int64, images []string) ([]volume, error) {
 	if err != nil {
 		return nil, err
 	}
-	var magic [4]byte
-	if n, _ := f.ReadAt(magic[:], 0); string(magic[:n]) != "hsqs" { // squashfs little-endian magic
+	var magic [6]byte
+	if n, _ := f.ReadAt(magic[:], 0); string(magic[:min(n, 4)]) != "hsqs" { // squashfs little-endian magic
 		if len(images) > 0 {
 			return nil, fmt.Errorf("%s: not a squashfs, --image does not apply", path)
 		}
-		if r, size, ok, err := openCompressed(path, f, st, budget); ok {
+		if bytes.HasPrefix(magic[:n], sevenMagic) {
+			v, err := open7z(path, f, st, budget)
 			if err != nil {
 				return nil, err
 			}
-			return openVolumes(filepath.Base(path), r, size), nil
+			return []volume{v}, nil
 		}
-		return openVolumes(filepath.Base(path), newChunkCache(f, st.Size(), 4<<20, budget), st.Size()), nil
+		r, size, ok, err := openCompressed(path, f, st, budget)
+		if err != nil {
+			return nil, err
+		}
+		var src io.ReaderAt = r // where a tar index pass reads headers: the bare file when uncompressed
+		if !ok {
+			r, size, src = newChunkCache(f, st.Size(), 4<<20, budget), st.Size(), f
+		}
+		if isTar(r) {
+			v, err := openTar(path, st, src, r, size)
+			if err != nil {
+				return nil, err
+			}
+			return []volume{v}, nil
+		}
+		return openVolumes(filepath.Base(path), r, size), nil
 	}
 	sq, err := squashfs.New(newChunkCache(f, st.Size(), 4<<20, budget/8*7))
 	if err != nil {

@@ -64,7 +64,8 @@ func openCompressed(path string, f *os.File, st os.FileInfo, budget int64) (r io
 	if err != nil {
 		return nil, 0, true, fmt.Errorf("%s: %w", path, err)
 	}
-	return newChunkCache(s, s.size, 4<<20, budget/8*7), s.size, true, nil
+	s.cache = newChunkCache(s, s.size, 4<<20, budget/8*7)
+	return s.cache, s.size, true, nil
 }
 
 // spanReader is an io.ReaderAt over a stream that can only be decoded forward
@@ -76,6 +77,8 @@ type spanReader struct {
 	starts []int64                        // uncompressed offset where span i begins, ascending, starts[0] = 0
 	open   func(i int) (io.Reader, error) // decoder positioned at starts[i]
 
+	cache *chunkCache // the cache wrapping this reader, if any: bytes skipped to reach a read are put there
+
 	cur    io.Reader
 	curIdx int
 	curPos int64
@@ -86,6 +89,9 @@ func (s *spanReader) span(off int64) int {
 }
 
 func (s *spanReader) seek(i int) (err error) {
+	if c, ok := s.cur.(io.Closer); ok {
+		c.Close() // returns pooled decoders (7z)
+	}
 	s.cur, s.curIdx, s.curPos = nil, i, s.starts[i]
 	s.cur, err = s.open(i)
 	return err
@@ -103,8 +109,32 @@ func (s *spanReader) ReadAt(p []byte, off int64) (n int, err error) {
 	defer s.mu.Unlock()
 	// Keep the live decoder when it is at or before off, but not behind off's span start.
 	if i := s.span(off); s.cur == nil || s.curPos > off || s.curPos < s.starts[i] {
-		err = s.seek(i)
+		if err = s.seek(i); err != nil {
+			s.cur = nil
+			return 0, err
+		}
 	}
+	// The decoder will pass through whole chunks before off: cache them instead of
+	// discarding (a solid 7z read out of archive order would re-decode them otherwise).
+	if s.cache != nil {
+		ch := s.cache.chunk
+		for g := (s.curPos + ch - 1) / ch * ch; g+ch <= off; g += ch {
+			buf := make([]byte, ch)
+			if _, err = s.read(buf, g); err != nil {
+				return 0, err
+			}
+			s.cache.put(g/ch, buf)
+		}
+	}
+	n, err = s.read(p, off)
+	if short && n == len(p) {
+		return n, io.EOF
+	}
+	return n, err
+}
+
+// read fills p from off with the live decoder, which ReadAt placed at or before off. s.mu held.
+func (s *spanReader) read(p []byte, off int64) (n int, err error) {
 	for err == nil && n < len(p) {
 		var k int64
 		if s.curPos < off {
@@ -126,9 +156,6 @@ func (s *spanReader) ReadAt(p []byte, off int64) (n int, err error) {
 	if n < len(p) {
 		s.cur = nil
 		return n, err
-	}
-	if short {
-		return n, io.EOF
 	}
 	return n, nil
 }
@@ -181,22 +208,18 @@ func openGzip(path string, f *os.File, st os.FileInfo, raw io.ReaderAt) (*spanRe
 		return nil, err
 	}
 	name := filepath.Base(path)
-	idxPaths := []string{path + ".idx"}
-	if dir, err := os.UserCacheDir(); err == nil {
-		// ponytail: same base name in two directories shares one cache entry (size/mtime check catches it), key by full path if that bites.
-		idxPaths = append(idxPaths, filepath.Join(dir, "backup-mounter", name+".idx"))
-	}
+	paths := idxPaths(path, ".idx")
 	var idx *os.File
 	var ft idxFooter
 	var recs []idxRecord
-	for _, p := range idxPaths {
+	for _, p := range paths {
 		if idx, ft, recs, err = loadIndex(p, st); err == nil {
 			log.Printf("%s: index loaded from %s, %d checkpoints", name, p, len(recs))
 			break
 		}
 	}
 	if idx == nil {
-		if idx, ft, recs, err = buildIndex(name, idxPaths, f, st, hdrLen); err != nil {
+		if idx, ft, recs, err = buildIndex(name, paths, f, st, hdrLen); err != nil {
 			return nil, err
 		}
 	}
@@ -214,6 +237,16 @@ func openGzip(path string, f *os.File, st os.FileInfo, raw io.ReaderAt) (*spanRe
 		return flate.Resume(bufio.NewReaderSize(io.NewSectionReader(raw, c, st.Size()-c), 64<<10), r.Bits, r.NBits, win), nil
 	}
 	return s, nil
+}
+
+// idxPaths lists where an index for the archive at path may live: next to it, else the user cache dir.
+func idxPaths(path, ext string) []string {
+	ps := []string{path + ext}
+	if dir, err := os.UserCacheDir(); err == nil {
+		// ponytail: same base name in two directories shares one cache entry (size/mtime check catches it), key by full path if that bites.
+		ps = append(ps, filepath.Join(dir, "backup-mounter", filepath.Base(path)+ext))
+	}
+	return ps
 }
 
 // gzipHeaderLen parses a gzip member header (RFC 1952) and returns its length.

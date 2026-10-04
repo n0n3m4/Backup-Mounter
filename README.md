@@ -5,7 +5,8 @@ VHD/VHDX, a raw MBR/GPT disk image, or a single-partition (bare filesystem)
 image (optionally gzip/xz compressed), an Acronis True Image `.tib`
 partition backup, or a qcow2 / VMDK virtual disk, all detected by signature. It opens everything in-process, reads the
 partition table and mounts every readable filesystem as its own read-only
-drive, from `Z:` downwards. Nothing is extracted, and no loop device is
+drive, from `Z:` downwards. A `.tar`, `.tar.gz`, `.tar.xz` or `.7z` archive is
+mounted as one drive labelled with the archive's file name. Nothing is extracted, and no loop device is
 attached.
 
 A RAM cache (default 8 GB) keeps reads from a NAS large and sequential:
@@ -20,14 +21,14 @@ squashfs blocks.
 ## Build
 
     make build      # backup-mounter.exe (CGO_ENABLED=0 GOOS=windows, -tags xz,zstd,lz4)
-    make fixtures   # test images, needs mkfs.ext4/btrfs/vfat/ntfs/exfat, sgdisk, parted, mksquashfs, qemu-img
+    make fixtures   # test images, needs mkfs.ext4/btrfs/vfat/ntfs/exfat, sgdisk, parted, mksquashfs, qemu-img, 7z
     make test
 
 Always build with `-tags xz,zstd,lz4`, or xz/zstd/lz4-compressed squashfs files won't open.
 
 ## Usage
 
-    backup-mounter.exe [flags] \\nas\share\backup.squashfs   # or disk.vhd, disk.vhdx, disk.img, disk.img.gz, disk.img.xz, backup.tib, disk.qcow2, disk.vmdk
+    backup-mounter.exe [flags] \\nas\share\backup.squashfs   # or disk.vhd, disk.vhdx, disk.img, disk.img.gz, disk.img.xz, backup.tib, disk.qcow2, disk.vmdk, backup.tar[.gz|.xz], backup.7z
 
 | flag | meaning |
 |---|---|
@@ -56,6 +57,15 @@ Known gaps:
   files must sit next to the descriptor). Delta/snapshot disks, COWD (ESX
   vmfsSparse) and SESPARSE extents are refused.
 - qcow2 and VMDK are opened as top-level files only, not inside a squashfs.
+- tar: plain, gzip or multi-block xz (`xz -T0`); the first mount reads every
+  header once (the whole stream for .gz/.xz) and saves the entry list to
+  `<archive>.tidx` (or the user cache dir). GNU sparse entries are skipped; v7
+  tar without the `ustar` magic, tar.zst and tar.bz2 are not recognised.
+- 7z: solid or not, every coder the bodgit/sevenzip library has (LZMA/LZMA2, BCJ,
+  PPMd, Deflate, bzip2, zstd, ...). Password-protected, multi-volume (`.7z.001`)
+  and self-extracting archives are not supported. Reading a file deep inside a
+  solid block decodes the block from its start (the bytes are kept in the cache).
+- Archives are opened as top-level files only, not inside a squashfs.
 - FAT12/16: not supported (skipped with a log line).
 - Symlinks (and devices, fifos) appear as empty files; NTFS reparse points
   appear as their plain file/dir. NTFS metafiles (`$MFT`, ...) are hidden.
@@ -64,7 +74,8 @@ Known gaps:
 - No read-ahead/prefetch yet; the chunk cache is where it would plug in.
 - Each NTFS volume serializes all reads behind one lock; ext4 serializes per open file.
 
-`third_party/` holds three patched forks (changes are marked `backup-mounter` in the source):
+`third_party/` holds patched forks (changes are marked `backup-mounter` in the source):
 `btrfs` (read-only range reader, subvolume crossing, zstd padding fix),
 `exfat` (multi-cluster NoFatChain directories listed in full) and
-`squashfs` (1 MiB uncompressed block size mask fix).
+`squashfs` (1 MiB uncompressed block size mask fix), `fat32` (timestamps),
+`flate` (Go's inflate with resumable checkpoints) and `sevenzip` (folder streams exported, `export.go`).

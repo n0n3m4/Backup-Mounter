@@ -9,7 +9,7 @@ mkdir -p "$OUT"
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$OUT"
 populate() { go -C "$ROOT" run ./testdata/populate "$1" "$PWD/$2" "$PWD/src"; } # FAT kinds: no mtools, so the readers' own libraries write
-rm -rf src gpt mbr vhd vmdk ./*.img ./*.vhd ./*.vhdx ./*.qcow2 ./*.squashfs manifest.sha256
+rm -rf src tarsrc gpt mbr vhd vmdk ./*.img ./*.vhd ./*.vhdx ./*.qcow2 ./*.squashfs ./*.tar* ./*.tidx ./*.7z manifest.sha256 manifest-tar.sha256
 
 # --- source tree (ext4 and btrfs get a copy; manifest lists regular files) ---
 mkdir -p src/dir/sub src/empty src/vol1/inner src/dir/vol2
@@ -25,6 +25,18 @@ echo two > src/dir/vol2/v2.txt
 truncate -s 8M src/sparse.bin && printf middle | dd of=src/sparse.bin bs=1 seek=4000000 conv=notrunc 2>/dev/null
 ln -s dir/random.bin src/link
 (cd src && find . -type f -exec sha256sum {} + | sort -k2) > manifest.sha256
+
+# --- archives: tar (plain, no dir entries, gz, multi-block xz) and 7z (solid, non-solid, encrypted) of a copy with a hard link and a >100-char path ---
+cp -a src tarsrc && ln tarsrc/hello.txt tarsrc/hello-hardlink.txt                   # tar stores the second name as a hard link
+L=$(printf 'l%.0s' $(seq 1 120)); mkdir "tarsrc/$L" && echo long > "tarsrc/$L/$L.txt" # > 100 chars: PAX path records
+(cd tarsrc && find . -type f -exec sha256sum {} + | sort -k2) > manifest-tar.sha256
+tar --format=posix -cf tarsrc.tar -C tarsrc .
+(cd tarsrc && find . \( -type f -o -type l -o \( -type d -empty \) \) | tar --format=posix --no-recursion -cf ../tarsrc-nodirs.tar -T -) # parents synthesised
+gzip -k tarsrc.tar
+xz -k -0 -T2 --block-size=1MiB tarsrc.tar                         # multi-block
+(cd tarsrc && 7z a -snl -mtc=on -mta=on -bso0 ../tarsrc.7z .)     # solid LZMA2; symlink kept as a link; ctime/atime stored
+(cd tarsrc && 7z a -snl -ms=off -bso0 ../tarsrc-ns.7z .)          # one folder per file
+(cd tarsrc && 7z a -snl -phunter2 -mhe=on -bso0 ../tarsrc-enc.7z .) # encrypted headers: must be refused
 
 # --- filesystem images ---
 mkfs.ext4 -q -F -L ext4vol -d src ext4.img 64M

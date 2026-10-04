@@ -27,6 +27,11 @@ func TestFixtures(t *testing.T) {
 	defer func(s int64) { indexSpan = s }(indexSpan)
 	indexSpan = 1 << 20                                  // 37 checkpoints in the 200 MiB fixture (zero runs make multi-MiB deflate blocks)
 	os.Remove(filepath.Join(dir, "mbr/disk.img.gz.idx")) // first open builds it, the second reuses it
+	os.Remove(filepath.Join(dir, "tarsrc.tar.gz.idx"))   // same for the tar.gz and every tar index
+	tidx, _ := filepath.Glob(filepath.Join(dir, "tarsrc*.tidx"))
+	for _, p := range tidx {
+		os.Remove(p)
+	}
 	img, err := os.ReadFile(filepath.Join(dir, "mbr/bare-ext4.img"))
 	if err != nil {
 		t.Fatal(err)
@@ -40,6 +45,8 @@ func TestFixtures(t *testing.T) {
 	}
 	want := readManifest(t, filepath.Join(dir, "manifest.sha256"))
 	want["link"] = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" // ponytail symlink: empty file
+	wantTar := readManifest(t, filepath.Join(dir, "manifest-tar.sha256"))
+	wantTar["link"] = want["link"]
 	st, err := os.Stat(filepath.Join(dir, "manifest.sha256"))
 	if err != nil {
 		t.Fatal(err)
@@ -72,7 +79,13 @@ func TestFixtures(t *testing.T) {
 		{"vmdk/split-s.vmdk", []string{"ext4", "ntfs", "fat32"}},                  // descriptor + sparse split-s-s001.vmdk
 		{"vmdk/split-f.vmdk", []string{"ext4", "ntfs", "fat32"}},                  // descriptor + flat split-f-f001.vmdk
 		{"vmdk/multi.vmdk", []string{"ext4", "ntfs", "fat32"}},                    // reads straddle FLAT extents, ZERO tail
-		{"manifest.sha256", nil}, // neither squashfs nor image: no volumes, no error
+		{"tarsrc.tar", []string{"tar"}},
+		{"tarsrc-nodirs.tar", []string{"tar"}}, // no directory entries: parents synthesised
+		{"tarsrc.tar.gz", []string{"tar"}},
+		{"tarsrc.tar.xz", []string{"tar"}},
+		{"tarsrc.7z", []string{"7z"}},    // solid
+		{"tarsrc-ns.7z", []string{"7z"}}, // one folder per file
+		{"manifest.sha256", nil},         // neither squashfs nor image: no volumes, no error
 	} {
 		for _, budget := range []int64{256 << 20, 32 << 20} { // 32 MiB: ~10x smaller than the image, forces eviction
 			vols, err := openStack(filepath.Join(dir, tc.file), budget, nil)
@@ -87,7 +100,7 @@ func TestFixtures(t *testing.T) {
 				t.Fatalf("%s: kinds %v, want %v", tc.file, kinds, tc.kinds)
 			}
 			for _, v := range vols {
-				if want := map[string]string{"ext4": "ext4vol", "btrfs": "btrfsvol", "fat32": "FATVOL", "ntfs": "ntfsvol", "exfat": "EXFATVOL"}[v.kind]; v.label != want {
+				if want := map[string]string{"ext4": "ext4vol", "btrfs": "btrfsvol", "fat32": "FATVOL", "ntfs": "ntfsvol", "exfat": "EXFATVOL", "tar": filepath.Base(tc.file), "7z": filepath.Base(tc.file)}[v.kind]; v.label != want {
 					t.Errorf("%s: label %q, want %q", v.name, v.label, want)
 				}
 				checkTimes(t, v, since)
@@ -107,6 +120,8 @@ func TestFixtures(t *testing.T) {
 					checkFiles(t, v, map[string]string{"hello.txt": want["hello.txt"], "random.bin": want["dir/random.bin"]})
 				case "ext4", "btrfs", "fat32", "exfat":
 					checkTree(t, v, filepath.Join(dir, "src"), want)
+				case "tar", "7z":
+					checkTree(t, v, filepath.Join(dir, "tarsrc"), wantTar)
 				}
 			}
 		}
@@ -141,6 +156,7 @@ func TestContainerErrors(t *testing.T) {
 	}
 	for _, tc := range []struct{ path, want string }{
 		{filepath.Join(dir, "overlay.qcow2"), "backing file"},
+		{filepath.Join(dir, "tarsrc-enc.7z"), "password-protected 7z not supported"},
 		{write("cowd.vmdk", "COWD\x01\x00\x00\x00"), "not supported"},
 		{write("missing.vmdk", "# Disk DescriptorFile\nversion=1\nparentCID=ffffffff\ncreateType=\"monolithicFlat\"\nRW 2048 FLAT \"gone-flat.vmdk\" 0\n"), "gone-flat.vmdk"},
 		{write("delta.vmdk", "# Disk DescriptorFile\nversion=1\nparentCID=1234abcd\nparentFileNameHint=\"base.vmdk\"\nRW 2048 SPARSE \"delta-s001.vmdk\"\n"), "parent not supported"},

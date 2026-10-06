@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log"
 	"sort"
 	"strings"
 
@@ -16,9 +17,34 @@ type image struct {
 	ino  *squashfs.Inode
 }
 
-// findImages returns the disk images inside the squashfs, largest first.
-// names (from --image) bypass detection.
-func findImages(sq *squashfs.Superblock, names []string) ([]image, error) {
+// findImages returns the disk images to mount: those named by --image, else every one
+// detected inside the squashfs, largest first. Detection always runs and is logged, so the
+// user sees every possible --image value at mount time.
+func findImages(base string, sq *squashfs.Superblock, names []string) ([]image, error) {
+	var found []image
+	err := fs.WalkDir(sq, ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil || !d.Type().IsRegular() {
+			return err
+		}
+		ino, err := sq.FindInode(p, false)
+		if err != nil {
+			return err
+		}
+		if isDiskImage(ino, int64(ino.Size)) {
+			found = append(found, image{p, ino})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.SliceStable(found, func(i, j int) bool { return found[i].ino.Size > found[j].ino.Size })
+	for _, img := range found {
+		log.Printf("%s: disk image %s (%d MiB), mountable with --image", base, img.name, img.ino.Size>>20)
+	}
+	if len(names) == 0 {
+		return found, nil
+	}
 	var imgs []image
 	for _, n := range names {
 		n = strings.TrimPrefix(n, "/")
@@ -28,34 +54,18 @@ func findImages(sq *squashfs.Superblock, names []string) ([]image, error) {
 		}
 		imgs = append(imgs, image{n, ino})
 	}
-	if len(names) == 0 {
-		err := fs.WalkDir(sq, ".", func(p string, d fs.DirEntry, err error) error {
-			if err != nil || !d.Type().IsRegular() {
-				return err
-			}
-			ino, err := sq.FindInode(p, false)
-			if err != nil {
-				return err
-			}
-			if isDiskImage(ino, int64(ino.Size)) {
-				imgs = append(imgs, image{p, ino})
-			}
-			return nil
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
-	sort.SliceStable(imgs, func(i, j int) bool { return imgs[i].ino.Size > imgs[j].ino.Size })
 	return imgs, nil
 }
 
 // isDiskImage: a VHD/VHDX, an MBR signature with a populated partition entry,
 // a GPT header, or a bare filesystem we can read.
 func isDiskImage(r io.ReaderAt, size int64) bool {
-	if sniffContainer(r, size) != "" {
-		return true
-	}
+	return rawDiskSignature(r) || sniffContainer(r, size) != ""
+}
+
+// rawDiskSignature: a GPT header, an MBR with a populated partition entry, or a
+// filesystem we can read, all within the first 64 KiB.
+func rawDiskSignature(r io.ReaderAt) bool {
 	var b [1024]byte
 	if n, _ := r.ReadAt(b[:], 0); n < len(b) {
 		return false

@@ -11,6 +11,9 @@ type tableReader struct {
 	buf   []byte
 	offt  int64
 	tofft int64 // position of table block list (when blocks aren't one after another)
+
+	blockStart int64 // backup-mounter: header position of the block in buf
+	blockLen   int   // backup-mounter: decompressed length of that block
 }
 
 func (sb *Superblock) newInodeReader(ino inodeRef) (*tableReader, error) {
@@ -71,6 +74,7 @@ func (i *tableReader) readBlock() error {
 		}
 		i.offt = int64(i.sb.order.Uint64(buf))
 	}
+	i.blockStart = i.offt // backup-mounter
 	buf := make([]byte, 2)
 	_, err := i.sb.fs.ReadAt(buf, i.offt)
 	if err != nil {
@@ -103,6 +107,7 @@ func (i *tableReader) readBlock() error {
 	}
 
 	i.buf = buf
+	i.blockLen = len(buf) // backup-mounter
 	//fmt.Printf("readBlock: offset=%d, compressedSize=%d, decompressedSize=%d\n", i.offt-int64(lenN)-2, lenN, len(buf))
 
 	return nil

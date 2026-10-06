@@ -11,6 +11,9 @@ import (
 // sniffContainer recognises the virtual-disk wrappers we can open:
 // "vhdxfile" at 0, "conectix" at 0 (dynamic VHD footer copy) or at size-512
 // (every VHD footer). Anything else ("" ) is treated as a raw disk or filesystem.
+// The tail is read only when the head shows no disk or filesystem signature: inside a
+// squashfs that read walks the file's whole block list (minutes for a TB at 4 KiB blocks),
+// and a fixed VHD of a partitioned disk reads fine as the raw disk it starts with.
 func sniffContainer(r io.ReaderAt, size int64) string {
 	at := func(off int64) string {
 		var b [8]byte
@@ -23,7 +26,11 @@ func sniffContainer(r io.ReaderAt, size int64) string {
 	switch {
 	case at(0) == "vhdxfile":
 		return "vhdx"
-	case at(0) == "conectix", at(size-512) == "conectix":
+	case at(0) == "conectix":
+		return "vhd"
+	case rawDiskSignature(r):
+		return ""
+	case at(size-512) == "conectix":
 		return "vhd"
 	}
 	return ""

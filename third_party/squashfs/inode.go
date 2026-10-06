@@ -3,10 +3,13 @@ package squashfs
 import (
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"log"
+	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 )
 
@@ -43,9 +46,8 @@ type Inode struct {
 	FragOfft  uint32 // offset within fragment block
 
 	// data block information
-	Blocks     []uint32         // block sizes, possibly with compression flags
-	BlocksOfft []uint64         // offsets for each block from StartBlock
-	DirIndex   []*DirIndexEntry // directory index entries for fast lookups
+	blocks   *blockList       // data block sizes and offsets, read on demand (backup-mounter: was Blocks/BlocksOfft arrays)
+	DirIndex []*DirIndexEntry // directory index entries for fast lookups
 }
 
 func (sb *Superblock) GetInode(ino uint64) (*Inode, error) {
@@ -254,29 +256,7 @@ func (sb *Superblock) GetInodeRef(inor inodeRef) (*Inode, error) {
 				blocks += 1
 			}
 		}
-		//log.Printf("estimated %d blocks", blocks)
-
-		ino.Blocks = make([]uint32, blocks)
-		ino.BlocksOfft = make([]uint64, blocks)
-
-		offt := uint64(0)
-
-		// read blocks
-		for i := 0; i < blocks; i += 1 {
-			err = binary.Read(r, sb.order, &u32)
-			if err != nil {
-				return nil, err
-			}
-
-			ino.Blocks[i] = u32
-			ino.BlocksOfft[i] = offt
-			offt += uint64(u32) & 0xffffff // backup-mounter fix: size is 24 bits; a stored 1 MiB block is 0x100000
-		}
-
-		if ino.FragBlock != 0xffffffff {
-			// this has a fragment instead of last block
-			ino.Blocks = append(ino.Blocks, 0xffffffff) // special code
-		}
+		ino.blocks = newBlockList(sb, r, blocks, ino.FragBlock != 0xffffffff) // backup-mounter: lazy, no eager read
 	case 9: // extended file
 		err = binary.Read(r, sb.order, &ino.StartBlock)
 		if err != nil {
@@ -321,30 +301,7 @@ func (sb *Superblock) GetInodeRef(inor inodeRef) (*Inode, error) {
 				blocks += 1
 			}
 		}
-		//log.Printf("estimated %d blocks", blocks)
-
-		ino.Blocks = make([]uint32, blocks)
-		ino.BlocksOfft = make([]uint64, blocks)
-		var u32 uint32
-
-		offt := uint64(0)
-
-		// read blocks
-		for i := 0; i < blocks; i += 1 {
-			err = binary.Read(r, sb.order, &u32)
-			if err != nil {
-				return nil, err
-			}
-
-			ino.Blocks[i] = u32
-			ino.BlocksOfft[i] = offt
-			offt += uint64(u32) & 0xffffff // backup-mounter fix: size is 24 bits; a stored 1 MiB block is 0x100000
-		}
-
-		if ino.FragBlock != 0xffffffff {
-			// this has a fragment instead of last block
-			ino.Blocks = append(ino.Blocks, 0xffffffff) // special code
-		}
+		ino.blocks = newBlockList(sb, r, blocks, ino.FragBlock != 0xffffffff) // backup-mounter: lazy, no eager read
 
 		//log.Printf("squashfs: read extended file success, sparse=%d size=%d fragblock=%x", ino.Sparse, ino.Size, ino.FragBlock)
 	case 3: // basic symlink
@@ -442,7 +399,11 @@ func (i *Inode) ReadAt(p []byte, off int64) (int, error) {
 			var buf []byte
 
 			// read block
-			switch i.Blocks[block] {
+			bsize, boff, err := i.blocks.at(block) // backup-mounter: lazy block index
+			if err != nil {
+				return n, err
+			}
+			switch bsize {
 			case 0xffffffff:
 				// this is a fragment, need to decode fragment
 				//log.Printf("frag table offset=%d", i.sb.FragTableStart)
@@ -504,14 +465,14 @@ func (i *Inode) ReadAt(p []byte, off int64) (int, error) {
 				// this part of the file contains only zeroes
 				buf = make([]byte, i.sb.BlockSize)
 			default:
-				buf = make([]byte, i.Blocks[block]&0xffffff) // backup-mounter fix: was 0xfffff
-				_, err := i.sb.fs.ReadAt(buf, int64(i.StartBlock+i.BlocksOfft[block]))
+				buf = make([]byte, bsize&0xffffff) // backup-mounter fix: was 0xfffff
+				_, err := i.sb.fs.ReadAt(buf, int64(i.StartBlock+boff))
 				if err != nil {
 					return n, err
 				}
 
 				// check for compression
-				if i.Blocks[block]&0x1000000 == 0 {
+				if bsize&0x1000000 == 0 {
 					// compressed
 					buf, err = i.sb.Comp.decompress(buf)
 					if err != nil {
@@ -645,4 +606,140 @@ func (i *Inode) GetGid() uint32 {
 		return i.sb.idTable[i.GidIdx]
 	}
 	return 0
+}
+
+// blockList gives the size and data offset of each block of a file inode without holding the
+// whole block list (12 bytes per block, 3 GB per TB at 4 KiB blocks): entries are read from the
+// inode table on demand, with one checkpoint per metadata block the list spans, extended forward
+// as farther entries are requested. backup-mounter addition.
+// ponytail: one cached span per inode; sequential reads hit it, random reads decode one or two
+// metadata blocks per span change. A small span LRU if random reads ever show up in profiles.
+type blockList struct {
+	n    int  // entries in the list (excluding the fragment marker)
+	frag bool // file ends in a fragment: entry n is the 0xffffffff marker
+	sb   *Superblock
+
+	mu sync.Mutex
+	// scan state: rd is positioned right after the last indexed entry
+	rd      *tableReader
+	scanned int         // entries read so far
+	offt    uint64      // cumulative data offset after `scanned` entries
+	ck      []blockCkpt // ascending entry index; ck[0] = list start
+	err     error       // sticky scan error
+	// one-span cache: entries [curEntry, curEntry+len(curSize)) with their data offsets
+	curEntry int
+	curSize  []uint32
+	curOfft  []uint64
+}
+
+// blockCkpt marks the first entry that starts in a metadata block. An entry may straddle into
+// the next block (inodes are not 4-aligned); it belongs to the block it starts in.
+type blockCkpt struct {
+	entry int    // first entry index starting in this metadata block
+	meta  int64  // absolute position of the metadata block header
+	skip  int    // byte offset of that entry inside the decompressed block
+	offt  uint64 // data offset of that entry
+}
+
+func newBlockList(sb *Superblock, r *tableReader, n int, frag bool) *blockList {
+	b := &blockList{n: n, frag: frag, sb: sb, rd: r, curEntry: -1}
+	b.ck = []blockCkpt{b.here()}
+	return b
+}
+
+// here is the checkpoint for the entry rd reads next. b.mu held (or not yet shared).
+func (b *blockList) here() blockCkpt {
+	if len(b.rd.buf) == 0 { // block consumed: the entry starts in the next one
+		return blockCkpt{b.scanned, b.rd.offt, 0, b.offt}
+	}
+	return blockCkpt{b.scanned, b.rd.blockStart, b.rd.blockLen - len(b.rd.buf), b.offt}
+}
+
+// spanDone reports whether the span holding entry k is fully scanned: the scan stands at a
+// metadata-block boundary past k (the next entry starts a new block) or at the end.
+func (b *blockList) spanDone(k int) bool {
+	return b.scanned > k && b.here().meta != b.ck[len(b.ck)-1].meta
+}
+
+// scanSpan reads entries from rd until the next one starts in another metadata block (or the
+// list ends), recording that block as a checkpoint. b.mu held.
+func (b *blockList) scanSpan() {
+	var e [4]byte
+	if c := b.here(); c.meta != b.ck[len(b.ck)-1].meta {
+		b.ck = append(b.ck, c)
+	}
+	for b.scanned < b.n {
+		if len(b.rd.buf) > 4 { // fast path: the entry lies inside the current block
+			copy(e[:], b.rd.buf)
+			b.rd.buf = b.rd.buf[4:]
+		} else if _, err := io.ReadFull(b.rd, e[:]); err != nil { // may straddle into the next block
+			b.err = err // rd is mid-entry now: the scan cannot resume
+			return
+		}
+		b.offt += uint64(b.sb.order.Uint32(e[:])) & 0xffffff // size is 24 bits; a stored 1 MiB block is 0x100000
+		b.scanned++
+		if b.here().meta != b.ck[len(b.ck)-1].meta {
+			return
+		}
+	}
+}
+
+// len is the number of blocks including the fragment marker.
+func (b *blockList) len() int {
+	if b.frag {
+		return b.n + 1
+	}
+	return b.n
+}
+
+// at returns entry k: the raw size word (compression flag at bit 24, 0 = sparse,
+// 0xffffffff = fragment) and the data offset from StartBlock.
+func (b *blockList) at(k int) (uint32, uint64, error) {
+	if k == b.n && b.frag {
+		return 0xffffffff, 0, nil
+	}
+	if k < 0 || k >= b.n {
+		return 0, 0, fmt.Errorf("squashfs: block %d out of range (%d blocks)", k, b.n)
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if k >= b.curEntry && k < b.curEntry+len(b.curSize) {
+		return b.curSize[k-b.curEntry], b.curOfft[k-b.curEntry], nil
+	}
+	// Scan through k and on to the end of its span (until the next entry starts in another
+	// metadata block), so the span loaded below is complete. One span per lock hold: a read
+	// deep into a TB-sized file scans for a long time and must not stall every other reader
+	// of the same inode (an open of the file, directory listings) meanwhile.
+	for b.err == nil && b.scanned < b.n && !b.spanDone(k) {
+		b.scanSpan()
+		b.mu.Unlock()
+		b.mu.Lock()
+	}
+	if b.err != nil {
+		return 0, 0, b.err
+	}
+	j := sort.Search(len(b.ck), func(j int) bool { return b.ck[j].entry > k }) - 1
+	c := b.ck[j]
+	end := b.scanned // the scan stopped at a block boundary (or n): the last span is complete
+	if j+1 < len(b.ck) {
+		end = b.ck[j+1].entry
+	}
+	r, err := b.sb.newTableReader(c.meta, c.skip)
+	if err != nil {
+		return 0, 0, err
+	}
+	var e [4]byte
+	b.curEntry, b.curSize, b.curOfft = c.entry, b.curSize[:0], b.curOfft[:0]
+	offt := c.offt
+	for i := c.entry; i < end; i++ {
+		if _, err := io.ReadFull(r, e[:]); err != nil {
+			b.curEntry, b.curSize, b.curOfft = -1, b.curSize[:0], b.curOfft[:0]
+			return 0, 0, err
+		}
+		sz := b.sb.order.Uint32(e[:])
+		b.curSize = append(b.curSize, sz)
+		b.curOfft = append(b.curOfft, offt)
+		offt += uint64(sz) & 0xffffff
+	}
+	return b.curSize[k-c.entry], b.curOfft[k-c.entry], nil
 }

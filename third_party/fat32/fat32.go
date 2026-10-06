@@ -725,7 +725,7 @@ func (fs *fat32FS) growChain(firstCluster uint32, oldClusters, newClusters, oldS
 	// guard it with a VisitSet (cycle) and a LoopGuard (over-long chain).
 	last := firstCluster
 	guard := safeio.NewLoopGuard(chainGuardLimit(fs))
-	var visited safeio.VisitSet
+	var visited visitBits // backup-mounter: bitmap, not a map
 	for {
 		if err := guard.Next(); err != nil {
 			rollback()
@@ -909,7 +909,7 @@ func (fs *fat32FS) writeDirBuf(startCluster uint32, buf []byte) error {
 	// of fresh links; a forged cyclic chain that re-enters an existing cluster
 	// is rejected by the VisitSet before it can loop.
 	guard := safeio.NewLoopGuard(chainGuardLimit(fs) + maxDirClusters)
-	var visited safeio.VisitSet
+	var visited visitBits // backup-mounter: bitmap, not a map
 	for pos := 0; pos < len(buf); pos += int(clusterSize) {
 		if err := guard.Next(); err != nil {
 			return fmt.Errorf("fat32: write directory chain from %d: %w", startCluster, err)
@@ -1532,7 +1532,7 @@ func (fs *fat32FS) readClusterChain(start uint32, size uint64) ([]byte, error) {
 
 	var buf []byte
 	guard := safeio.NewLoopGuard(chainGuardLimit(fs))
-	var visited safeio.VisitSet
+	var visited visitBits // backup-mounter: bitmap, not a map
 	cluster := start
 	for {
 		if cluster < 2 || cluster >= 0x0FFFFFF7 {
@@ -1659,7 +1659,7 @@ func (fs *fat32FS) setFATEntry(cluster uint32, value uint32) error {
 func (fs *fat32FS) freeChain(start uint32) error {
 	fatBase := fs.info.FATOffset(fs.partOffset)
 	guard := safeio.NewLoopGuard(chainGuardLimit(fs))
-	var visited safeio.VisitSet
+	var visited visitBits // backup-mounter: bitmap, not a map
 	cluster := start
 	for cluster >= 2 && cluster < 0x0FFFFFF7 {
 		if err := guard.Next(); err != nil {

@@ -11,8 +11,10 @@ import (
 	"os"
 	"os/signal"
 	"path"
+	"runtime"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -28,7 +30,17 @@ func mount(vols []volume, debug bool) error {
 	if err != nil {
 		return fmt.Errorf("GetLogicalDrives: %w", err)
 	}
-	var mounted []*winfsp.FileSystem
+	if debug && logFile != nil {
+		// go-winfsp's procs are value copies resolved when the DLL loads; DebugLogSetHandle before
+		// the first Mount would panic on an unresolved copy, so load the DLL explicitly first.
+		if err := winfsp.LoadWinFSP(); err != nil {
+			return fmt.Errorf("load WinFsp: %w", err)
+		}
+		if err := winfsp.DebugLogSetHandle(syscall.Handle(logFile.Fd())); err != nil {
+			log.Printf("WinFsp debug log to --log file: %v", err)
+		}
+	}
+	go readWatchdog()
 	defer func() {
 		for _, m := range mounted {
 			m.Unmount()
@@ -178,6 +190,7 @@ func (w *winFS) OpenFile(name string, flag int, perm os.FileMode) (gofs.File, er
 	if flag&writeFlags != 0 {
 		return nil, os.ErrPermission
 	}
+	defer track("open", name, 0, 0)()
 	p, fi, err := w.resolve(name)
 	if err != nil {
 		return nil, err
@@ -195,6 +208,7 @@ func (w *winFS) OpenFile(name string, flag int, perm os.FileMode) (gofs.File, er
 }
 
 func (w *winFS) Stat(name string) (os.FileInfo, error) {
+	defer track("stat", name, 0, 0)()
 	_, fi, err := w.resolve(name)
 	return fi, err
 }
@@ -202,6 +216,74 @@ func (w *winFS) Stat(name string) (os.FileInfo, error) {
 func (w *winFS) Mkdir(string, os.FileMode) error { return os.ErrPermission }
 func (w *winFS) Rename(string, string) error     { return os.ErrPermission }
 func (w *winFS) Remove(string) error             { return os.ErrPermission }
+
+// readTrack is one WinFsp request in progress (open, stat, readdir, read), for readWatchdog.
+type readTrack struct {
+	op    string
+	path  string
+	off   int64
+	n     int
+	start time.Time
+}
+
+var (
+	readSeq  atomic.Int64
+	inFlight sync.Map // id -> *readTrack
+)
+
+// track registers a request in progress; call the returned func when it completes.
+func track(op, path string, off int64, n int) func() {
+	id := readSeq.Add(1)
+	inFlight.Store(id, &readTrack{op, path, off, n, time.Now()})
+	return func() { inFlight.Delete(id) }
+}
+
+// mounted lists the live WinFsp volumes, for the Ctrl-C path and the watchdog.
+var mounted []*winfsp.FileSystem
+
+// readWatchdog logs every request that has been in progress for over 10 s, with a dump of all
+// goroutine stacks (every 30 s at most), so a frozen mount leaves evidence of where it stuck:
+// our code, a decoder, or the source file. A read stuck past watchdogLimit unmounts and exits:
+// WinFsp fails the pending requests when its process goes away, which frees Explorer and
+// everything queued behind it.
+func readWatchdog() {
+	var lastDump time.Time
+	for range time.Tick(10 * time.Second) {
+		stuck, oldest := 0, time.Duration(0)
+		inFlight.Range(func(_, v any) bool {
+			if t := v.(*readTrack); time.Since(t.start) > 10*time.Second {
+				stuck++
+				oldest = max(oldest, time.Since(t.start))
+				log.Printf("stuck %s: %s @%d +%d for %s", t.op, t.path, t.off, t.n, time.Since(t.start).Round(time.Second))
+			}
+			return true
+		})
+		if stuck > 0 && (time.Since(lastDump) > 30*time.Second || oldest > watchdogLimit) {
+			lastDump = time.Now()
+			buf := make([]byte, 1<<20)
+			log.Printf("goroutine dump (%d stuck reads):\n%s", stuck, buf[:runtime.Stack(buf, true)])
+		}
+		if watchdogLimit > 0 && oldest > watchdogLimit {
+			log.Printf("watchdog: a read has been stuck for %s (--watchdog %s): unmounting and exiting", oldest.Round(time.Second), watchdogLimit)
+			done := make(chan struct{})
+			go func() {
+				for _, m := range mounted {
+					m.Unmount()
+				}
+				close(done)
+			}()
+			select {
+			case <-done:
+			case <-time.After(10 * time.Second):
+				log.Printf("watchdog: unmount did not finish in 10 s, exiting anyway")
+			}
+			if logFile != nil {
+				logFile.Sync()
+			}
+			os.Exit(3)
+		}
+	}
+}
 
 type winFile struct {
 	w      *winFS
@@ -212,11 +294,24 @@ type winFile struct {
 	off    int64
 }
 
+// ReadAt serves a WinFsp read. A read that takes seconds stalls the IRP (and Explorer with it):
+// log it, so a hang can be traced to a slow source or a stuck decoder. WinFsp has one dispatcher
+// thread per core; when all of them sit in slow reads the kernel queue grows and every program
+// touching the volume hangs, so the --debug line also reports how many reads are in progress.
 func (f *winFile) ReadAt(p []byte, off int64) (int, error) {
 	if f.r == nil {
 		return 0, io.EOF
 	}
-	return f.r.ReadAt(p, off)
+	start := time.Now()
+	activeReads.Add(1)
+	done := track("read", f.path, off, len(p))
+	n, err := f.r.ReadAt(p, off)
+	done()
+	activeReads.Add(-1)
+	if d := time.Since(start); d > 2*time.Second {
+		log.Printf("slow read: %s @%d +%d took %s (err %v)", f.path, off, len(p), d.Round(time.Millisecond), err)
+	}
+	return n, err
 }
 
 func (f *winFile) Read(p []byte) (int, error) {
@@ -246,6 +341,7 @@ func (f *winFile) Readdir(count int) ([]os.FileInfo, error) {
 	if !f.info.IsDir() {
 		return nil, os.ErrInvalid
 	}
+	defer track("readdir", f.path, 0, 0)()
 	d, err := f.w.list(f.path)
 	if err != nil {
 		return nil, err

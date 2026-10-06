@@ -11,8 +11,10 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -47,6 +49,11 @@ func TestFixtures(t *testing.T) {
 	want["link"] = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" // ponytail symlink: empty file
 	wantTar := readManifest(t, filepath.Join(dir, "manifest-tar.sha256"))
 	wantTar["link"] = want["link"]
+	wantErofs := readManifest(t, filepath.Join(dir, "manifest-erofs.sha256"))
+	var wantNtfs map[string]string // only when make_fixtures.sh found ntfs-3g
+	if _, err := os.Stat(filepath.Join(dir, "manifest-ntfs.sha256")); err == nil {
+		wantNtfs = readManifest(t, filepath.Join(dir, "manifest-ntfs.sha256"))
+	}
 	st, err := os.Stat(filepath.Join(dir, "manifest.sha256"))
 	if err != nil {
 		t.Fatal(err)
@@ -60,6 +67,7 @@ func TestFixtures(t *testing.T) {
 		{"gpt-zstd.squashfs", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat"}},
 		{"gpt-lz4.squashfs", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat"}},
 		{"mbr-gzip.squashfs", []string{"ext4", "ntfs", "fat32", "ext4"}}, // 2 logical partitions, then the bare image
+		{"mbr-4k.squashfs", []string{"ext4", "ntfs", "fat32", "ext4"}},   // 4 KiB blocks: lazy block index spans many metadata blocks
 		{"gpt-dyn.vhd", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat"}},
 		{"gpt-fixed.vhd", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat"}},
 		{"gpt.vhdx", []string{"ext4", "btrfs", "fat32", "ntfs", "exfat"}},
@@ -83,12 +91,33 @@ func TestFixtures(t *testing.T) {
 		{"tarsrc-nodirs.tar", []string{"tar"}}, // no directory entries: parents synthesised
 		{"tarsrc.tar.gz", []string{"tar"}},
 		{"tarsrc.tar.xz", []string{"tar"}},
-		{"tarsrc.7z", []string{"7z"}},    // solid
-		{"tarsrc-ns.7z", []string{"7z"}}, // one folder per file
-		{"manifest.sha256", nil},         // neither squashfs nor image: no volumes, no error
+		{"tarsrc.7z", []string{"7z"}},                 // solid
+		{"tarsrc-ns.7z", []string{"7z"}},              // one folder per file
+		{"erofs/none.erofs", []string{"erofs"}},       // uncompressed: flat plain + inline tails
+		{"erofs/chunk.erofs", []string{"erofs"}},      // chunk-based
+		{"erofs/lz4.erofs", []string{"erofs"}},        // legacy LZ4 (no compression configs)
+		{"erofs/compact.erofs", []string{"erofs"}},    // compact inodes, compact (2B/4B) lcluster indexes
+		{"erofs/extended.erofs", []string{"erofs"}},   // extended inodes
+		{"erofs/lz4-bigp.erofs", []string{"erofs"}},   // big pclusters
+		{"erofs/lz4-frag.erofs", []string{"erofs"}},   // fragments (packed inode), PARTIAL_REF dedupe, ztailpacking, shifted plain
+		{"erofs/dedupe.erofs", []string{"erofs"}},     // dedupe, full lcluster indexes
+		{"erofs/lzma.erofs", []string{"erofs"}},       // MicroLZMA
+		{"erofs/lzma-frag.erofs", []string{"erofs"}},  // MicroLZMA big pclusters + fragments, interlaced plain
+		{"erofs/deflate.erofs", []string{"erofs"}},    // DEFLATE
+		{"erofs/deflate-dd.erofs", []string{"erofs"}}, // DEFLATE, dedupe + ztailpacking + fragments
+		{"erofs/zstd.erofs", []string{"erofs"}},       // zstd
+		{"erofs/zstd-16k.erofs", []string{"erofs"}},   // zstd 16K pclusters, every file a whole-file fragment
+		{"dedup.erofs", []string{"erofs"}},            // erofs-dedup: 48-bit extents (hole, raw, MicroLZMA), a deduplicated copy, an empty file
+		{"dedup.erofs --image disk.img,bare-ext4.img", []string{"ext4", "ntfs", "fat32", "ext4"}},
+		{"manifest.sha256", nil}, // neither squashfs nor image: no volumes, no error
 	} {
+		file, imgs, _ := strings.Cut(tc.file, " --image ")
+		var images []string
+		if imgs != "" {
+			images = strings.Split(imgs, ",")
+		}
 		for _, budget := range []int64{256 << 20, 32 << 20} { // 32 MiB: ~10x smaller than the image, forces eviction
-			vols, err := openStack(filepath.Join(dir, tc.file), budget, nil)
+			vols, err := openStack(filepath.Join(dir, file), budget, images)
 			if err != nil {
 				t.Fatalf("%s: %v", tc.file, err)
 			}
@@ -100,7 +129,7 @@ func TestFixtures(t *testing.T) {
 				t.Fatalf("%s: kinds %v, want %v", tc.file, kinds, tc.kinds)
 			}
 			for _, v := range vols {
-				if want := map[string]string{"ext4": "ext4vol", "btrfs": "btrfsvol", "fat32": "FATVOL", "ntfs": "ntfsvol", "exfat": "EXFATVOL", "tar": filepath.Base(tc.file), "7z": filepath.Base(tc.file)}[v.kind]; v.label != want {
+				if want := map[string]string{"ext4": "ext4vol", "btrfs": "btrfsvol", "fat32": "FATVOL", "ntfs": "ntfsvol", "exfat": "EXFATVOL", "tar": filepath.Base(file), "7z": filepath.Base(file), "erofs": filepath.Base(file)}[v.kind]; v.label != want {
 					t.Errorf("%s: label %q, want %q", v.name, v.label, want)
 				}
 				checkTimes(t, v, since)
@@ -114,17 +143,33 @@ func TestFixtures(t *testing.T) {
 					for _, e := range root {
 						names = append(names, e.Name())
 					}
-					if !slices.Equal(names, []string{"hello.txt", "random.bin"}) { // metafiles hidden
+					wantRoot, files := []string{"hello.txt", "random.bin"}, map[string]string{"hello.txt": want["hello.txt"], "random.bin": want["dir/random.bin"]}
+					if wantNtfs != nil { // built through ntfs-3g: compressed + sparse files too
+						wantRoot, files = []string{"comp", "hello.txt", "random.bin", "sparse.bin"}, wantNtfs
+					}
+					if !slices.Equal(names, wantRoot) { // metafiles hidden
 						t.Errorf("%s: root = %v", v.name, names)
 					}
-					checkFiles(t, v, map[string]string{"hello.txt": want["hello.txt"], "random.bin": want["dir/random.bin"]})
+					checkFiles(t, v, files)
 				case "ext4", "btrfs", "fat32", "exfat":
 					checkTree(t, v, filepath.Join(dir, "src"), want)
 				case "tar", "7z":
 					checkTree(t, v, filepath.Join(dir, "tarsrc"), wantTar)
+				case "erofs":
+					if strings.HasPrefix(file, "erofs/") {
+						checkTree(t, v, filepath.Join(dir, "src"), want)
+					} else {
+						checkFiles(t, v, wantErofs)
+					}
 				}
 			}
 		}
+	}
+	if _, err := openStack(filepath.Join(dir, "dedup.erofs"), 32<<20, []string{"nope"}); err == nil || !strings.Contains(err.Error(), `no file "nope"`) {
+		t.Errorf("dedup.erofs --image nope: err = %v", err)
+	}
+	if vols, err := openStack(filepath.Join(dir, "erofs/lz4.erofs"), 32<<20, []string{"dir/random.bin"}); err != nil || len(vols) != 0 { // nested --image path; random data is no disk
+		t.Errorf("lz4.erofs --image dir/random.bin: %d volumes, err = %v", len(vols), err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, "mbr/disk.img.gz.idx")); err != nil {
 		t.Errorf("gzip index not written next to the archive: %v", err)
@@ -157,6 +202,7 @@ func TestContainerErrors(t *testing.T) {
 	for _, tc := range []struct{ path, want string }{
 		{filepath.Join(dir, "overlay.qcow2"), "backing file"},
 		{filepath.Join(dir, "tarsrc-enc.7z"), "password-protected 7z not supported"},
+		{write("future.erofs", string(make([]byte, 1024))+"\xe2\xe1\xf5\xe0"+string(make([]byte, 8))+"\x0c"+string(make([]byte, 67))+"\x00\x00\x00\x80"+string(make([]byte, 4096-1108))), "unsupported incompatible feature"},
 		{write("cowd.vmdk", "COWD\x01\x00\x00\x00"), "not supported"},
 		{write("missing.vmdk", "# Disk DescriptorFile\nversion=1\nparentCID=ffffffff\ncreateType=\"monolithicFlat\"\nRW 2048 FLAT \"gone-flat.vmdk\" 0\n"), "gone-flat.vmdk"},
 		{write("delta.vmdk", "# Disk DescriptorFile\nversion=1\nparentCID=1234abcd\nparentFileNameHint=\"base.vmdk\"\nRW 2048 SPARSE \"delta-s001.vmdk\"\n"), "parent not supported"},
@@ -281,4 +327,98 @@ func checkTimes(t *testing.T, v volume, since time.Time) {
 		}
 		return nil
 	})
+}
+
+// TestConcurrentReads reads every file of every volume in the 4 KiB-block squashfs from eight
+// goroutines at once with odd offsets: NTFS data reads take no lock since session 10, and the
+// squashfs block index releases its lock between scan steps, so this is what -race must cover.
+func TestConcurrentReads(t *testing.T) {
+	dir := os.Getenv("BM_FIXTURES")
+	if dir == "" {
+		t.Skip("BM_FIXTURES not set")
+	}
+	want := readManifest(t, filepath.Join(dir, "manifest.sha256"))
+	want["link"] = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+	vols, err := openStack(filepath.Join(dir, "mbr-4k.squashfs"), 32<<20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range vols {
+		fs.WalkDir(v.fsys, ".", func(p string, d fs.DirEntry, err error) error {
+			if err != nil || !d.Type().IsRegular() {
+				return err
+			}
+			sum, ok := want[p]
+			if v.kind == "ntfs" {
+				sum, ok = want[map[string]string{"hello.txt": "hello.txt", "random.bin": "dir/random.bin"}[p]]
+			}
+			if !ok {
+				return nil
+			}
+			var wg sync.WaitGroup
+			for g := 0; g < 8; g++ {
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					f, err := v.fsys.Open(p)
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					h := sha256.New()
+					buf := make([]byte, 7777+g*1234)
+					for off := int64(0); ; {
+						n, err := f.(io.ReaderAt).ReadAt(buf, off)
+						h.Write(buf[:n])
+						off += int64(n)
+						if err != nil {
+							break
+						}
+					}
+					if hex.EncodeToString(h.Sum(nil)) != sum {
+						t.Errorf("%s: %s: concurrent read gives a different sha256", v.name, p)
+					}
+				}()
+			}
+			wg.Wait()
+			return nil
+		})
+	}
+}
+
+// TestOpenAllocations: opening a file must not allocate memory proportional to its size. The
+// exFAT library validated a declared length by calling safeio.MakeBytes and discarding the
+// result, so every open of a 200 GB file committed 200 GB (session 10, the "system dies" bug).
+func TestOpenAllocations(t *testing.T) {
+	dir := os.Getenv("BM_FIXTURES")
+	if dir == "" {
+		t.Skip("BM_FIXTURES not set")
+	}
+	vols, err := openStack(filepath.Join(dir, "gpt-zstd.squashfs"), 32<<20, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range vols {
+		fi, err := fs.Stat(v.fsys, "dir/random.bin")
+		if err != nil {
+			continue // the NTFS fixture has root files only
+		}
+		var before, after runtime.MemStats
+		runtime.ReadMemStats(&before)
+		for i := 0; i < 20; i++ {
+			f, err := v.fsys.Open("dir/random.bin")
+			if err != nil {
+				t.Fatal(err)
+			}
+			f.Close()
+		}
+		runtime.ReadMemStats(&after)
+		per := int64(after.TotalAlloc-before.TotalAlloc) / 20
+		t.Logf("%s (%s): %d bytes allocated per open of a %d-byte file", v.name, v.kind, per, fi.Size())
+		// The bug class is a buffer of the file's size (exFAT allocated 2.6x); FAT32 legitimately
+		// spends ~300 B per cluster on its chain walk, more under -race, so the bar is half the size.
+		if per > fi.Size()/2 {
+			t.Errorf("%s: opening a %d-byte file allocates %d bytes per open", v.name, fi.Size(), per)
+		}
+	}
 }

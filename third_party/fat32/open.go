@@ -117,7 +117,7 @@ func (fs *fat32FS) chainClusters(start uint32, size uint64) ([]uint32, int64, er
 	var clusters []uint32
 	var covered int64
 	guard := safeio.NewLoopGuard(chainGuardLimit(fs))
-	var visited safeio.VisitSet
+	var visited visitBits // backup-mounter: bitmap, not a map
 	cluster := start
 	for {
 		if cluster < 2 || cluster >= 0x0FFFFFF7 {

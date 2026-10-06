@@ -45,7 +45,7 @@ func openCompressed(path string, f *os.File, st os.FileInfo, budget int64) (r io
 		if err != nil {
 			return nil, 0, true, fmt.Errorf("%s: %w", path, err)
 		}
-		return newChunkCache(r, size, 4<<20, budget/8*7), size, true, nil
+		return newChunkCache(r, size, 4<<20, budget/8*7), size, true, nil // no read-ahead: an uncompressed qcow2 / flat VMDK would make it pure IO
 	case bytes.HasPrefix(magic[:n], []byte("COWD")):
 		return nil, 0, true, fmt.Errorf("%s: COWD sparse VMDK (ESX vmfsSparse / Workstation 3) not supported", path)
 	case n >= 2 && string(magic[:2]) == "\x1f\x8b":
@@ -57,7 +57,7 @@ func openCompressed(path string, f *os.File, st os.FileInfo, budget int64) (r io
 		if err != nil {
 			return nil, 0, true, fmt.Errorf("%s: %w", path, err)
 		}
-		return newChunkCache(t, t.size, t.blockSize, budget), t.size, true, nil
+		return newChunkCache(t, t.size, t.blockSize, budget).withAhead(), t.size, true, nil
 	default:
 		return nil, 0, false, nil
 	}

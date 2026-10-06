@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type countingReader struct {
@@ -87,5 +88,55 @@ func TestSpanGapFill(t *testing.T) {
 		if !bytes.Equal(e.data, src[i<<20:(i+1)<<20]) {
 			t.Fatalf("chunk %d: wrong bytes", i)
 		}
+	}
+}
+
+// A sequential read (chunk 0, then 1) prefetches the following chunks in the background, one
+// burst capped at the semaphore's NumCPU slots (later gets top up), with the right bytes.
+func TestChunkCacheReadAhead(t *testing.T) {
+	const chunk = 4096
+	src := make([]byte, 64*chunk)
+	rand.New(rand.NewSource(3)).Read(src)
+	c := newChunkCache(bytes.NewReader(src), int64(len(src)), chunk, 64*chunk).withAhead()
+	if c.ahead != 32 {
+		t.Fatalf("ahead = %d, want 32 (half the budget)", c.ahead)
+	}
+	if _, err := c.ReadAt(make([]byte, 10), chunk-5); err != nil { // chunks 0 and 1: sequential
+		t.Fatal(err)
+	}
+	want := min(c.ahead, int64(cap(prefetchSem)))
+	for deadline := time.Now().Add(2 * time.Second); ; time.Sleep(time.Millisecond) {
+		c.mu.Lock()
+		n := int64(0)
+		for j := int64(1); j <= want; j++ {
+			if e, ok := c.m[j]; ok && e.el != nil {
+				n++
+			}
+		}
+		c.mu.Unlock()
+		if n == want {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d of %d chunks prefetched after 2 s", n, want)
+		}
+	}
+	c.mu.Lock()
+	for j := int64(1); j <= want; j++ {
+		if !bytes.Equal(c.m[j].data, src[j*chunk:(j+1)*chunk]) {
+			t.Fatalf("chunk %d: wrong bytes", j)
+		}
+	}
+	if _, ok := c.m[c.ahead+2]; ok {
+		t.Fatalf("chunk %d prefetched beyond ahead", c.ahead+2)
+	}
+	c.mu.Unlock()
+	// A lone read (previous chunk not cached) reads nothing ahead.
+	if _, err := c.ReadAt(make([]byte, 10), 50*chunk); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if c.missing(50) || !c.missing(51) {
+		t.Fatal("non-sequential read triggered read-ahead")
 	}
 }

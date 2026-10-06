@@ -8,7 +8,7 @@ import (
 
 func (i *Inode) FillAttr(attr *fuse.Attr) error {
 	attr.Size = i.Size
-	attr.Blocks = uint64(len(i.Blocks)) + 1
+	attr.Blocks = uint64(i.blocks.len()) + 1 // backup-mounter: lazy block index
 	attr.Mode = modeToUnix(i.Mode())
 	attr.Nlink = i.NLink // 1 required
 	attr.Rdev = 1

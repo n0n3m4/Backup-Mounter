@@ -8,8 +8,10 @@ OUT=${1:?usage: make_fixtures.sh OUTDIR}
 mkdir -p "$OUT"
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 cd "$OUT"
+EROFS_DEDUP=${EROFS_DEDUP:-erofs-dedup} # ~/Backup-EROFS/erofs-dedup, not on PATH
 populate() { go -C "$ROOT" run ./testdata/populate "$1" "$PWD/$2" "$PWD/src"; } # FAT kinds: no mtools, so the readers' own libraries write
-rm -rf src tarsrc gpt mbr vhd vmdk ./*.img ./*.vhd ./*.vhdx ./*.qcow2 ./*.squashfs ./*.tar* ./*.tidx ./*.7z manifest.sha256 manifest-tar.sha256
+fusermount -u ntfsmnt 2>/dev/null || true # left mounted by an aborted run
+rm -rf ntfsmnt manifest-ntfs.sha256 src tarsrc gpt mbr vhd vmdk erofs ./*.img ./*.vhd ./*.vhdx ./*.qcow2 ./*.squashfs ./*.tar* ./*.tidx ./*.7z ./*.erofs ./*.erofs.idx manifest.sha256 manifest-tar.sha256 manifest-erofs.sha256
 
 # --- source tree (ext4 and btrfs get a copy; manifest lists regular files) ---
 mkdir -p src/dir/sub src/empty src/vol1/inner src/dir/vol2
@@ -47,6 +49,18 @@ rm -f fat32.img && mkfs.vfat -F 32 -s 1 -n FATVOL -C fat32.img 65536 >/dev/null 
 truncate -s 64M exfat.img && mkfs.exfat -L EXFATVOL exfat.img >/dev/null && populate -kind=exfat exfat.img
 truncate -s 64M ntfs.img && mkfs.ntfs -q -F -Q -L ntfsvol ntfs.img >/dev/null 2>&1
 ntfscp -q ntfs.img src/hello.txt hello.txt && ntfscp -q ntfs.img src/dir/random.bin random.bin # root files only: ntfscp cannot mkdir
+# NTFS compression (LZNT1 units, raw units, sparse units, partial tail) + a sparse file, through ntfs-3g FUSE; skipped without it
+if command -v ntfs-3g >/dev/null && mkdir -p ntfsmnt && ntfs-3g -o compression ntfs.img ntfsmnt 2>/dev/null; then
+  mkdir ntfsmnt/comp
+  python3 -c "import os,struct; os.setxattr('ntfsmnt/comp','system.ntfs_attrib',struct.pack('<I',0x810),follow_symlinks=False)" # DIRECTORY|COMPRESSED: new files inherit it (0x820)
+  seq 1 3000000 > ntfsmnt/comp/seq.txt                # every unit LZNT1
+  head -c 1M /dev/urandom > ntfsmnt/comp/random.bin   # incompressible: units stored raw
+  (for i in $(seq 1 8); do head -c 65536 /dev/zero; head -c 65536 /dev/urandom; head -c 20000 /dev/zero; done) > ntfsmnt/comp/mixed.bin # sparse units merged across neighbours (old go-ntfs bug)
+  truncate -s 8M ntfsmnt/sparse.bin && printf middle | dd of=ntfsmnt/sparse.bin bs=1 seek=4000000 conv=notrunc 2>/dev/null # plain sparse, not compressed
+  (cd ntfsmnt && find . -type f -exec sha256sum {} + | sort -k2) > manifest-ntfs.sha256
+  fusermount -u ntfsmnt
+fi
+rmdir ntfsmnt 2>/dev/null || true
 
 # --- GPT disk: ext4, btrfs, fat32, ntfs, exfat at 1, 65, 193, 257, 321 MiB ---
 mkdir gpt
@@ -95,10 +109,32 @@ qemu-img convert -q -f raw -O vmdk -o subformat=twoGbMaxExtentFlat mbr/disk.img 
 mksquashfs gpt gpt-zstd.squashfs -comp zstd -b 1M -noappend -quiet -no-progress
 mksquashfs gpt gpt-lz4.squashfs -comp lz4 -Xhc -b 1M -noappend -quiet -no-progress
 mksquashfs mbr mbr-gzip.squashfs -comp gzip -b 1M -noappend -quiet -no-progress
+mksquashfs mbr mbr-4k.squashfs -comp zstd -b 4K -noappend -quiet -no-progress  # 51200 block entries over ~25 metadata blocks: lazy block index
 mksquashfs vhd vhd-zstd.squashfs -comp zstd -b 1M -noappend -quiet -no-progress
 # after mbr-gzip.squashfs, so the squashfs does not contain these (the rm at the top removes mbr/)
 gzip -k mbr/disk.img                                         # one member, indexed on first open (disk.img.gz.idx)
 xz -k -0 -T2 --block-size=8MiB mbr/disk.img                  # 25 blocks: random access via the xz index
 xz -0 -T1 -c mbr/bare-ext4.img > mbr/single.img.xz           # one block (-T1: xz >= 5.6 is multi-threaded, hence multi-block, by default): must be rejected
+# --- EROFS: erofs-dedup (holes, raw, MicroLZMA; a second copy fully deduplicated; an empty file) ---
+"$EROFS_DEDUP" create dedup.erofs mbr/disk.img mbr/bare-ext4.img 2>/dev/null
+"$EROFS_DEDUP" add dedup.erofs -name disk-copy.img mbr/disk.img 2>/dev/null
+: > empty.bin && "$EROFS_DEDUP" add dedup.erofs empty.bin 2>/dev/null && rm empty.bin
+(sha256sum mbr/disk.img mbr/bare-ext4.img | sed 's#  mbr/#  #'; echo "$(sha256sum < mbr/disk.img | cut -d' ' -f1)  disk-copy.img"; echo "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  empty.bin") > manifest-erofs.sha256
+# stock mkfs.erofs images of src, one per on-disk layout / feature (mkfs 1.9 supports only -b 4096)
+mkdir erofs
+mkfs.erofs                                         erofs/none.erofs       src >/dev/null # uncompressed, inline tails
+mkfs.erofs --chunksize=16384                       erofs/chunk.erofs      src >/dev/null # CHUNK_BASED
+mkfs.erofs -zlz4                                   erofs/lz4.erofs        src >/dev/null # legacy LZ4, no compr_cfgs
+mkfs.erofs -zlz4hc -Eforce-inode-compact           erofs/compact.erofs    src >/dev/null
+mkfs.erofs -zlz4hc -Eforce-inode-extended          erofs/extended.erofs   src >/dev/null
+mkfs.erofs -zlz4hc -C65536                         erofs/lz4-bigp.erofs   src >/dev/null # big pcluster
+mkfs.erofs -zlz4hc -Efragments,dedupe,ztailpacking erofs/lz4-frag.erofs   src >/dev/null # packed inode, PARTIAL_REF, inline pcluster
+mkfs.erofs -zlz4hc -Ededupe,fragments              erofs/dedupe.erofs     src >/dev/null # dedupe needs fragments: mkfs 1.9.1 -Ededupe alone writes a 4 KiB image fsck rejects
+mkfs.erofs -zlzma                                  erofs/lzma.erofs       src >/dev/null
+mkfs.erofs -zlzma -C32768 -Efragments              erofs/lzma-frag.erofs  src >/dev/null # not +ztailpacking: mkfs 1.9.1 writes the packed tail shifted but flags it interlaced (erofsfuse reads garbage too)
+mkfs.erofs -zdeflate                               erofs/deflate.erofs    src >/dev/null
+mkfs.erofs -zdeflate -Ededupe,fragments,ztailpacking erofs/deflate-dd.erofs src >/dev/null
+mkfs.erofs -zzstd                                  erofs/zstd.erofs       src >/dev/null
+mkfs.erofs -zzstd -C16384 -Eall-fragments          erofs/zstd-16k.erofs   src >/dev/null # whole files in the packed inode
 rm -rf gpt vhd ext4.img btrfs.img fat32.img ntfs.img exfat.img # mbr/ stays: raw disk + bare partition, tested as top-level files
 ls -l "$OUT"

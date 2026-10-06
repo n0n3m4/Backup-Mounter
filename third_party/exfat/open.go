@@ -9,7 +9,6 @@ import (
 	"sync/atomic"
 
 	filesystem "github.com/go-filesystems/interface"
-	"github.com/go-volumes/safeio"
 )
 
 // Verify implementation of the optional read-at-an-offset interface.
@@ -128,8 +127,11 @@ func (fs *exfatFS) chainClusters(start uint32, size uint64) ([]uint32, int64, er
 	clusterSize := int64(fs.info.ClusterSize())
 	fatBase := fs.info.FATOffsetBytes(fs.partOffset)
 
+	// backup-mounter: upstream validated size by calling safeio.MakeBytes and discarding the
+	// result, i.e. every OpenFile allocated (and Go committed) a buffer of the file's declared
+	// size for nothing: 200 GB of commit per open of a 200 GB file. Compare instead.
 	capBytes := fs.maxChainBytes()
-	if _, err := safeio.MakeBytes(int64(size), int64(capBytes)); err != nil {
+	if size > capBytes {
 		size = capBytes
 	}
 
@@ -138,7 +140,7 @@ func (fs *exfatFS) chainClusters(start uint32, size uint64) ([]uint32, int64, er
 	// The walk appends one cluster per iteration and size is clamped to the
 	// heap capacity, so it terminates after at most ClusterCount iterations
 	// even on a maximal acyclic chain; the VisitSet bounds a cyclic one.
-	var seen safeio.VisitSet
+	var seen visitBits // backup-mounter: bitmap, not a map
 	cluster := start
 	for {
 		if cluster < 2 || cluster >= 0xFFFFFFF7 {

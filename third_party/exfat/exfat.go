@@ -811,7 +811,7 @@ func (fs *exfatFS) writeDirBuf(startCluster uint32, buf []byte) error {
 	// self-referential chain, so a corrupt directory FAT cannot make
 	// writeDirBuf loop forever (finding C1).
 	guard := safeio.NewLoopGuard(int(fs.info.ClusterCount) + 1)
-	var seen safeio.VisitSet
+	var seen visitBits // backup-mounter: bitmap, not a map
 	cluster := startCluster
 	for pos := 0; pos < len(buf); pos += int(clusterSize) {
 		if cluster < 2 || cluster >= 0xFFFFFFF7 {
@@ -951,8 +951,11 @@ func (fs *exfatFS) readClusterChain(start uint32, size uint64) ([]byte, error) {
 	// the correct outcome for an over-long declared length. The buffer starts
 	// empty and grows incrementally as clusters are appended, so no single
 	// huge allocation is ever made (finding C2).
+	// backup-mounter: upstream validated size by calling safeio.MakeBytes and discarding the
+	// result, i.e. it allocated (and the Go runtime committed) a buffer of the declared size
+	// for nothing. A plain comparison is the check that was meant.
 	capBytes := fs.maxChainBytes()
-	if _, err := safeio.MakeBytes(int64(size), int64(capBytes)); err != nil {
+	if size > capBytes {
 		size = capBytes
 	}
 	buf := make([]byte, 0)
@@ -963,7 +966,7 @@ func (fs *exfatFS) readClusterChain(start uint32, size uint64) ([]byte, error) {
 	// most ClusterCount iterations even on a maximal acyclic chain, so the
 	// visited set can hold at most ClusterCount entries — bounded memory, no
 	// separate LoopGuard needed here.
-	var seen safeio.VisitSet
+	var seen visitBits // backup-mounter: bitmap, not a map
 	cluster := start
 	for {
 		if cluster < 2 || cluster >= 0xFFFFFFF7 {
@@ -1192,7 +1195,7 @@ func (fs *exfatFS) freeChain(start uint32) error {
 	// self-referential chain, so a corrupt FAT cannot make freeChain loop
 	// forever (finding C1).
 	guard := safeio.NewLoopGuard(int(fs.info.ClusterCount) + 1)
-	var seen safeio.VisitSet
+	var seen visitBits // backup-mounter: bitmap, not a map
 	cluster := start
 	for cluster >= 2 && cluster < 0xFFFFFFF7 {
 		if err := guard.Next(); err != nil {

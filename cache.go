@@ -70,14 +70,6 @@ var (
 	caches   []weak.Pointer[chunkCache]
 )
 
-// memReport is one log line of Go heap, goroutine and per-cache figures (used bytes / budget,
-// entries, in flight), to tell a heap leak from memory outside the Go heap.
-func memReport() string {
-	var ms runtime.MemStats
-	runtime.ReadMemStats(&ms)
-	return fmt.Sprintf("mem: heap %d MiB live, %d MiB from OS, %d goroutines; caches:%s", ms.HeapAlloc>>20, ms.Sys>>20, runtime.NumGoroutine(), cacheReport())
-}
-
 // cacheReport is " used/budget MiB (entries, in flight)" for every cache.
 func cacheReport() string {
 	var s string

@@ -92,11 +92,6 @@ func main() {
 		}
 		return
 	}
-	go func() { // one line a minute: enough to see whether memory grows inside the Go heap or outside it
-		for range time.Tick(time.Minute) {
-			log.Print(memReport())
-		}
-	}()
 	if err := mount(vols, *debug); err != nil {
 		log.Fatal(err)
 	}

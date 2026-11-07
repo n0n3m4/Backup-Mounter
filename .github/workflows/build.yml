@@ -27,6 +27,9 @@ jobs:
           name: backup-mounter
           path: backup-mounter.exe
       - if: startsWith(github.ref, 'refs/tags/v')
-        run: gh release create "$GITHUB_REF_NAME" backup-mounter.exe --generate-notes
+        # the release may already exist (made in the GitHub UI, which also pushes the tag)
+        run: |
+          gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1 || gh release create "$GITHUB_REF_NAME" --generate-notes
+          gh release upload "$GITHUB_REF_NAME" backup-mounter.exe --clobber
         env:
           GH_TOKEN: ${{ github.token }}

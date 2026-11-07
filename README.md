@@ -11,9 +11,10 @@ image (a folder of its files; `--image path/in/erofs` mounts the disk images
 inside it instead). Nothing is extracted, and no loop device is
 attached.
 
-A RAM cache (default 4 GB, `--cache`) keeps reads from a NAS large and sequential:
-7/8 holds raw squashfs bytes in 4 MiB chunks, 1/8 holds decompressed
-squashfs blocks.
+A RAM cache (default 4 GB, `--cache`) keeps reads from a NAS large and sequential.
+For a squashfs, 7/8 holds raw bytes in 4 MiB chunks and 1/8 decompressed squashfs
+blocks; for gzip/xz, qcow2/VMDK, 7z and EROFS the split is the other way round
+(1/8 raw, 7/8 decompressed); a `.tib` uses all of it for decompressed blocks.
 
 ## Requirements
 
@@ -38,10 +39,10 @@ Always build with `-tags xz,zstd,lz4`, or xz/zstd/lz4-compressed squashfs files 
 | `--cache 4G` | RAM cache budget (`512M`, `16G`, ...); the process stays near this plus a quarter |
 | `--readahead 16M` | decode-ahead window per file (squashfs images, .tib, EROFS); raise it to keep more cores busy, `0` turns it off |
 | `--image path` | disk image inside the squashfs or erofs (every candidate is listed in the log at mount time); repeatable; squashfs default auto-detects every VHD/VHDX, MBR/GPT disk or bare filesystem, largest first; erofs default mounts the erofs itself as one folder |
-| `--watchdog 3m` | a read stuck this long makes the mounter dump goroutines, unmount and exit, so a frozen volume frees itself (`0` = never) |
+| `--watchdog 1m` | a read stuck this long makes the mounter dump goroutines, unmount and exit, so a frozen volume frees itself (`0` = never) |
 | `--log file` | append the log to a file instead of the console (with `--debug` also WinFsp's request trace); a read stuck for 30 s is logged with a goroutine dump |
 | `--walk` | instead of mounting, print path, size and sha256 of every file (also works on Linux, which never mounts) |
-| `--debug` | WinFsp debug log |
+| `--debug` | WinFsp request trace, plus a heap/cache/reads-in-progress line every 10 s; if memory jumps far past the cache budget, writes `heap-<unix>.pprof` next to the log and dumps every goroutine |
 
 Ctrl-C unmounts everything.
 
@@ -82,7 +83,7 @@ Known gaps:
 - FAT12/16: not supported (skipped with a log line).
 - Symlinks (and devices, fifos) appear as empty files; NTFS reparse points
   appear as their plain file/dir. NTFS metafiles (`$MFT`, ...) are hidden.
-- FAT32 and exFAT timestamps are not exposed by the libraries and show as zero.
+- FAT/exFAT volume roots have no directory entry and show 1970; FAT access times are date-only.
 - btrfs shows the top-level subvolume, not the `set-default` one; single-device only.
 - Background read-ahead (`--readahead`, default 16 MiB, up to one decode per CPU core) runs only where blocks decompress
   independently: disk images inside squashfs, .tib, EROFS; never as extra raw disk reads.
@@ -91,6 +92,8 @@ Known gaps:
 
 `third_party/` holds patched forks (changes are marked `backup-mounter` in the source):
 `btrfs` (read-only range reader, subvolume crossing, zstd padding fix),
-`exfat` (multi-cluster NoFatChain directories listed in full) and
-`squashfs` (1 MiB uncompressed block size mask fix), `fat32` (timestamps),
+`exfat` (multi-cluster NoFatChain directories listed in full, timestamps, opens no
+longer allocate file-sized buffers, bitmap cycle check), `squashfs` (1 MiB uncompressed
+block size mask fix, LZ4, block lists read on demand instead of all at open),
+`fat32` (timestamps, bitmap cycle check),
 `flate` (Go's inflate with resumable checkpoints) and `sevenzip` (folder streams exported, `export.go`).
